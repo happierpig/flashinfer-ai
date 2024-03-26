@@ -33,9 +33,11 @@ void _TestSinglePrefillKernelCorrectness(size_t qo_len, size_t kv_len, size_t nu
   std::vector<DTypeOut> o(qo_len * num_qo_heads * head_dim);
 
   utils::vec_normal_(q);
+  // utils::vec_fill_<DTypeIn>(q, 0.f);
   utils::vec_normal_(k);
-  // utils::vec_normal_(v);
-  utils::vec_fill_<DTypeIn>(v, 1.f);
+  // utils::vec_fill_<DTypeIn>(k, 1.f);
+  utils::vec_normal_(v);
+  // utils::vec_fill_<DTypeIn>(v, 1.f);
   utils::vec_zero_(o);
 
   thrust::device_vector<DTypeIn> q_d(q);
@@ -107,7 +109,7 @@ template <typename DTypeIn, typename DTypeOut>
 void TestSinglePrefillKernelShortContextCorrectness(bool allow_fp16_qk_reduction) {
   float rtol = std::is_same<DTypeOut, nv_bfloat16>::value ? 1e-2 : 1e-3;
   float atol = std::is_same<DTypeOut, nv_bfloat16>::value ? 1e-2 : 1e-3;
-  for (size_t qkv_len : {32}) {
+  for (size_t qkv_len : {1}) {
     for (size_t num_qo_heads : {1}) {
       for (size_t num_kv_heads : {1}) {
         for (size_t head_dim : {128}) {
@@ -115,8 +117,9 @@ void TestSinglePrefillKernelShortContextCorrectness(bool allow_fp16_qk_reduction
             for (size_t pos_encoding_mode : {0}) {
               for (size_t kv_layout : {0}) {
                 _TestSinglePrefillKernelCorrectness<DTypeIn, DTypeOut>(
-                    1, qkv_len, num_qo_heads, num_kv_heads, head_dim, causal, QKVLayout(kv_layout),
-                    PosEncodingMode(pos_encoding_mode), allow_fp16_qk_reduction, rtol, atol);
+                    qkv_len, 128, num_qo_heads, num_kv_heads, head_dim, causal,
+                    QKVLayout(kv_layout), PosEncodingMode(pos_encoding_mode),
+                    allow_fp16_qk_reduction, rtol, atol);
               }
             }
           }
