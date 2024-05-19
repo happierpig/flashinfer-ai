@@ -80,10 +80,12 @@ enum class FragLayout {
  * \note The sin/cos computation is slow, especially for A100 GPUs which has low
  *   non tensor-ops flops, will optimize in the future.
  */
-template <FragLayout frag_layout, uint32_t group_size, typename T>
+template <FragLayout frag_layout, typename T>
 __device__ __forceinline__ void frag_apply_llama_rope(T* x_first_half, T* x_second_half,
-                                                      const float* rope_freq, uint32_t offset,
+                                                      const float* rope_freq, const uint32_t offset,
+                                                      const uint32_t group_size,
                                                       float scale = 1.f) {
+  // TODO(Zihao): fix it.
 #pragma unroll
   for (uint32_t reg_id = 0; reg_id < 8; ++reg_id) {
     float cos, sin, tmp;
@@ -108,12 +110,11 @@ __device__ __forceinline__ void frag_apply_llama_rope(T* x_first_half, T* x_seco
   }
 }
 
-template <FragLayout frag_layout, uint32_t group_size, typename T, typename IdType>
-__device__ __forceinline__ void frag_apply_llama_rope_with_pos(T* x_first_half, T* x_second_half,
-                                                               const float* rope_freq,
-                                                               uint32_t offset,
-                                                               const IdType* q_offset,
-                                                               float scale = 1.f) {
+template <FragLayout frag_layout, typename T, typename IdType>
+__device__ __forceinline__ void frag_apply_llama_rope_with_pos(
+    T* x_first_half, T* x_second_half, const float* rope_freq, const uint32_t offset,
+    const uint32_t group_size, const IdType* q_offset, float scale = 1.f) {
+  // TODO(Zihao): fix it
   float pos[2] = {static_cast<float>(q_offset[offset]),
                   static_cast<float>(q_offset[offset + (8 / group_size)])};
 #pragma unroll
@@ -147,7 +148,6 @@ __device__ __forceinline__ void frag_apply_llama_rope_with_pos(T* x_first_half, 
  * \tparam num_frags_z The number of fragments in z dimension.
  * \tparam num_warps The number of warps in the threadblock.
  * \tparam kv_layout The layout of the input tensor.
- * \tparam group_size The number of qo heads that maps to a kv head (used in GQA).
  * \tparam T The data type of the input tensor.
  * \param smem The shared memory to store kv fragments.
  * \param gptr The global memory pointer.
@@ -283,26 +283,25 @@ __device__ __forceinline__ void init_states(float (*o_frag)[num_frags_y][8], DTy
   }
 }
 
-template <uint32_t group_size, uint32_t num_frags_x, uint32_t num_frags_y, typename DTypeIn>
+template <uint32_t num_frags_x, uint32_t num_frags_y, typename DTypeIn>
 __device__ __forceinline__ void load_q_global_smem(uint32_t q_idx_base,
                                                    const uint32_t qo_upper_bound,
                                                    DTypeIn* q_ptr_base, const uint32_t qo_n_stride,
-                                                   const uint32_t qo_h_stride, smem_t* q_smem) {
+                                                   const uint32_t qo_h_stride,
+                                                   const uint32_t group_size, smem_t* q_smem) {
   constexpr uint32_t head_dim = num_frags_y * 16;
   constexpr uint32_t channel_size_128b_in = head_dim / num_elems_per_128b<DTypeIn>();
   const uint32_t tx = threadIdx.x, ty = threadIdx.y;
   uint32_t q_smem_offset_w =
       smem_t::get_permuted_offset<channel_size_128b_in>(ty * num_frags_x * 16 + tx / 8, tx % 8);
 
-  q_idx_base += (tx / 8) / group_size;
-  q_ptr_base += ((tx / 8) / group_size) * qo_n_stride + ((tx / 8) % group_size) * qo_h_stride;
 #pragma unroll
   for (uint32_t fx = 0; fx < num_frags_x; ++fx) {
 #pragma unroll
     for (uint32_t j = 0; j < 4; ++j) {
-      const uint32_t q_idx = q_idx_base + (fx * 16 + j * 4) / group_size;
-      DTypeIn* q_ptr = q_ptr_base + ((fx * 16 + j * 4) / group_size) * qo_n_stride +
-                       ((fx * 16 + j * 4) % group_size) * qo_h_stride;
+      const uint32_t q_idx = q_idx_base + (tx / 8 + fx * 16 + j * 4) / group_size;
+      DTypeIn* q_ptr = q_ptr_base + ((tx / 8 + fx * 16 + j * 4) / group_size) * qo_n_stride +
+                       ((tx / 8 + fx * 16 + j * 4) % group_size) * qo_h_stride;
 #pragma unroll
       for (uint32_t fyo = 0; fyo < num_frags_y / 4; ++fyo) {
         // load q fragment from gmem to smem
@@ -317,11 +316,11 @@ __device__ __forceinline__ void load_q_global_smem(uint32_t q_idx_base,
   }
 }
 
-template <uint32_t group_size, uint32_t num_warps, uint32_t num_frags_x, uint32_t num_frags_y,
-          typename DTypeIn>
+template <uint32_t num_warps, uint32_t num_frags_x, uint32_t num_frags_y, typename DTypeIn>
 __device__ __forceinline__ void q_smem_inplace_apply_rotary_multiply_sm_scale(
-    const uint32_t q_idx_base, const uint32_t qo_len, const uint32_t kv_len, smem_t* q_smem,
-    uint32_t* q_smem_offset_r, float (*rope_freq)[4], const float sm_scale) {
+    const uint32_t q_idx_base, const uint32_t qo_len, const uint32_t kv_len,
+    const uint32_t group_size, smem_t* q_smem, uint32_t* q_smem_offset_r, float (*rope_freq)[4],
+    const float sm_scale) {
   constexpr uint32_t head_dim = num_frags_y * 16;
   constexpr uint32_t channel_size_128b_in = head_dim / num_elems_per_128b<DTypeIn>();
   const uint32_t tx = threadIdx.x;
@@ -329,7 +328,7 @@ __device__ __forceinline__ void q_smem_inplace_apply_rotary_multiply_sm_scale(
   static_assert(num_frags_y % 4 == 0, "num_frags_y must be a multiple of 4");
 #pragma unroll
   for (uint32_t fx = 0; fx < num_frags_x; ++fx) {
-    uint32_t q_idx = q_idx_base + (fx * 16 + tx / 4) / group_size;
+    uint32_t q_idx = q_idx_base + (tx % 8 + fx * 16 + tx / 4) / group_size;
     uint32_t q_smem_offset_r_first_half = *q_smem_offset_r;
 #pragma unroll
     for (uint32_t fyi = 0; fyi < num_frags_y / 2; ++fyi) {
@@ -337,9 +336,9 @@ __device__ __forceinline__ void q_smem_inplace_apply_rotary_multiply_sm_scale(
       uint32_t q_smem_offset_r_last_half =
           q_smem->advance_offset_by_column<num_frags_y>(q_smem_offset_r_first_half, 0);
       q_smem->ldmatrix_m8n8x4(q_smem_offset_r_last_half, q_frag_local[1]);
-      frag_apply_llama_rope<FragLayout::kRowMajor, group_size, DTypeIn>(
+      frag_apply_llama_rope<FragLayout::kRowMajor, DTypeIn>(
           (DTypeIn*)q_frag_local[0], (DTypeIn*)q_frag_local[1], rope_freq[fyi],
-          q_idx + kv_len - qo_len, sm_scale);
+          q_idx + kv_len - qo_len, group_size, sm_scale);
       q_smem->stmatrix_m8n8x4(q_smem_offset_r_last_half, q_frag_local[1]);
       q_smem->stmatrix_m8n8x4(q_smem_offset_r_first_half, q_frag_local[0]);
       q_smem_offset_r_first_half =
@@ -350,11 +349,11 @@ __device__ __forceinline__ void q_smem_inplace_apply_rotary_multiply_sm_scale(
   *q_smem_offset_r -= num_frags_x * 16 * channel_size_128b_in;
 }
 
-template <uint32_t group_size, uint32_t num_warps, uint32_t num_frags_x, uint32_t num_frags_y,
-          typename DTypeIn, typename IdType>
+template <uint32_t num_warps, uint32_t num_frags_x, uint32_t num_frags_y, typename DTypeIn,
+          typename IdType>
 __device__ __forceinline__ void q_smem_inplace_apply_rotary_with_pos_multiply_sm_scale(
-    const uint32_t q_idx_base, const IdType* q_offset, smem_t* q_smem, uint32_t* q_smem_offset_r,
-    float (*rope_freq)[4], const float sm_scale) {
+    const uint32_t q_idx_base, const IdType* q_offset, smem_t* q_smem, const uint32_t group_size,
+    uint32_t* q_smem_offset_r, float (*rope_freq)[4], const float sm_scale) {
   constexpr uint32_t head_dim = num_frags_y * 16;
   constexpr uint32_t channel_size_128b_in = head_dim / num_elems_per_128b<DTypeIn>();
   const uint32_t tx = threadIdx.x;
@@ -362,7 +361,7 @@ __device__ __forceinline__ void q_smem_inplace_apply_rotary_with_pos_multiply_sm
   static_assert(num_frags_y % 4 == 0, "num_frags_y must be a multiple of 4");
 #pragma unroll
   for (uint32_t fx = 0; fx < num_frags_x; ++fx) {
-    uint32_t q_idx = q_idx_base + (fx * 16 + tx / 4) / group_size;
+    uint32_t q_idx = q_idx_base + (tx % 8 + fx * 16 + tx / 4) / group_size;
     uint32_t q_smem_offset_r_first_half = *q_smem_offset_r;
 #pragma unroll
     for (uint32_t fyi = 0; fyi < num_frags_y / 2; ++fyi) {
@@ -370,9 +369,9 @@ __device__ __forceinline__ void q_smem_inplace_apply_rotary_with_pos_multiply_sm
       uint32_t q_smem_offset_r_last_half =
           q_smem->advance_offset_by_column<num_frags_y>(q_smem_offset_r_first_half, 0);
       q_smem->ldmatrix_m8n8x4(q_smem_offset_r_last_half, q_frag_local[1]);
-      frag_apply_llama_rope_with_pos<FragLayout::kRowMajor, group_size, DTypeIn>(
-          (DTypeIn*)q_frag_local[0], (DTypeIn*)q_frag_local[1], rope_freq[fyi], q_idx, q_offset,
-          sm_scale);
+      frag_apply_llama_rope_with_pos<FragLayout::kRowMajor, DTypeIn>(
+          (DTypeIn*)q_frag_local[0], (DTypeIn*)q_frag_local[1], rope_freq[fyi], q_idx, group_size,
+          q_offset, sm_scale);
       q_smem->stmatrix_m8n8x4(q_smem_offset_r_last_half, q_frag_local[1]);
       q_smem->stmatrix_m8n8x4(q_smem_offset_r_first_half, q_frag_local[0]);
       q_smem_offset_r_first_half =
@@ -805,12 +804,13 @@ __device__ __forceinline__ void grid_sync_mdo_states(float (*o_frag)[num_frags_y
   }
 }
 
-template <uint32_t group_size, uint32_t num_frags_x, uint32_t num_frags_y, typename DTypeOut>
+template <uint32_t num_frags_x, uint32_t num_frags_y, typename DTypeOut>
 __device__ __forceinline__ void write_o_reg_gmem(float (*o_frag)[num_frags_y][8], smem_t* o_smem,
                                                  DTypeOut* o_ptr_base, uint32_t o_idx_base,
                                                  const uint32_t qo_upper_bound,
                                                  const uint32_t qo_n_stride,
-                                                 const uint32_t qo_h_stride) {
+                                                 const uint32_t qo_h_stride,
+                                                 const uint32_t group_size) {
   constexpr uint32_t head_dim = num_frags_y * 16;
   constexpr uint32_t channel_size_128b_out = head_dim / num_elems_per_128b<DTypeOut>();
   const uint32_t tx = threadIdx.x, ty = threadIdx.y;
@@ -835,15 +835,13 @@ __device__ __forceinline__ void write_o_reg_gmem(float (*o_frag)[num_frags_y][8]
   uint32_t o_smem_offset_w =
       smem_t::get_permuted_offset<channel_size_128b_out>(ty * num_frags_x * 16 + tx / 8, tx % 8);
 
-  o_idx_base += (tx / 8) / group_size;
-  o_ptr_base += ((tx / 8) / group_size) * qo_n_stride + ((tx / 8) % group_size) * qo_h_stride;
 #pragma unroll
   for (uint32_t fx = 0; fx < num_frags_x; ++fx) {
 #pragma unroll
     for (uint32_t j = 0; j < 4; ++j) {
-      const uint32_t o_idx = o_idx_base + (fx * 16 + j * 4) / group_size;
-      DTypeOut* o_ptr = o_ptr_base + ((fx * 16 + j * 4) / group_size) * qo_n_stride +
-                        ((fx * 16 + j * 4) % group_size) * qo_h_stride;
+      const uint32_t o_idx = o_idx_base + (tx / 8 + fx * 16 + j * 4) / group_size;
+      DTypeOut* o_ptr = o_ptr_base + ((tx / 8 + fx * 16 + j * 4) / group_size) * qo_n_stride +
+                        ((tx / 8 + fx * 16 + j * 4) % group_size) * qo_h_stride;
 #pragma unroll
       for (uint32_t fyo = 0; fyo < num_frags_y / 4; ++fyo) {
         if (o_idx < qo_upper_bound) {
