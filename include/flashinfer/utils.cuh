@@ -112,25 +112,6 @@
     throw std::invalid_argument(err_msg.str());             \
   }
 
-#define DISPATCH_GQA_GROUP_SIZE(group_size, GROUP_SIZE, ...) \
-  if (group_size == 1) {                                     \
-    constexpr size_t GROUP_SIZE = 1;                         \
-    __VA_ARGS__                                              \
-  } else if (group_size == 4) {                              \
-    constexpr size_t GROUP_SIZE = 4;                         \
-    __VA_ARGS__                                              \
-  } else if (group_size == 6) {                              \
-    constexpr size_t GROUP_SIZE = 6;                         \
-    __VA_ARGS__                                              \
-  } else if (group_size == 8) {                              \
-    constexpr size_t GROUP_SIZE = 8;                         \
-    __VA_ARGS__                                              \
-  } else {                                                   \
-    std::ostringstream err_msg;                              \
-    err_msg << "Unsupported group_size: " << group_size;     \
-    throw std::invalid_argument(err_msg.str());              \
-  }
-
 #define DISPATCH_CAUSAL(causal, CAUSAL, ...) \
   if (causal) {                              \
     constexpr bool CAUSAL = true;            \

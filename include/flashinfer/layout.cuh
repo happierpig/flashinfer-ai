@@ -66,8 +66,8 @@ template <QKVLayout kv_layout, uint32_t head_dim>
 struct tensor_info_t {
   uint32_t qo_len;
   uint32_t kv_len;
-  uint32_t num_kv_heads;
   uint32_t num_qo_heads;
+  uint32_t num_kv_heads;
   __host__ __device__ __forceinline__ tensor_info_t(uint32_t qo_len, uint32_t kv_len,
                                                     uint32_t num_qo_heads, uint32_t num_kv_heads)
       : qo_len(qo_len), kv_len(kv_len), num_qo_heads(num_qo_heads), num_kv_heads(num_kv_heads) {}
@@ -84,6 +84,10 @@ struct tensor_info_t {
                                                                 uint32_t feat_idx) const {
     return get_elem_offset_impl<kv_layout, head_dim>(kv_idx, kv_head_idx, feat_idx, kv_len,
                                                      num_kv_heads);
+  }
+
+  __host__ __device__ __forceinline__ uint32_t get_group_size() const {
+    return num_qo_heads / num_kv_heads;
   }
 
   __host__ __device__ __forceinline__ uint32_t get_qo_n_stride() const {

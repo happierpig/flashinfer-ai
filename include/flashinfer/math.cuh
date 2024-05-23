@@ -114,6 +114,55 @@ __forceinline__ __device__ float rsqrt(float x) {
   return y;
 }
 
+struct fast_divisor {
+  uint32_t magic;
+  uint32_t shift;
+
+  static fast_divisor make(uint32_t d) {
+    // copied from int_fastdiv project: https://github.com/milakov/int_fastdiv
+    int p;
+    fast_divisor ret;
+    unsigned int ad, anc, delta, q1, r1, q2, r2, t;
+    const unsigned two31 = 0x80000000;
+    ad = (d == 0) ? 1 : d;
+    t = two31 + ((unsigned int)d >> 31);
+    anc = t - 1 - t % ad;
+    p = 31;
+    q1 = two31 / anc;
+    r1 = two31 - q1 * anc;
+    q2 = two31 / ad;
+    r2 = two31 - q2 * ad;
+    do {
+      ++p;
+      q1 = 2 * q1;
+      r1 = 2 * r1;
+      if (r1 >= anc) {
+        ++q1;
+        r1 -= anc;
+      }
+      q2 = 2 * q2;
+      r2 = 2 * r2;
+      if (r2 >= ad) {
+        ++q2;
+        r2 -= ad;
+      }
+      delta = ad - r2;
+    } while (q1 < delta || (q1 == delta && r1 == 0));
+    ret.magic = q2 + 1;
+    ret.shift = p - 32;
+  }
+
+  __host__ __device__ __forceinline__ void dividemod(uint32_t* quotient, uint32_t* remainder,
+                                                     const uint32_t n) {
+#ifdef __CUDA_ARCH__
+    asm("mul.hi.u32 %0, %1, %2;" : "=r"(*quotient) : "r"(magic), "r"(n));
+#else
+    *quotient = (((unsigned long long)((long long)magic * (long long)n)) >> 32);
+#endif
+    *remainder = n - *quotient * magic;
+  }
+};
+
 }  // namespace math
 }  // namespace flashinfer
 #endif  // FLASHINFER_MATH_CUH_
