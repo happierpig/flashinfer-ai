@@ -109,9 +109,11 @@ __device__ __forceinline__ void k_frag_apply_llama_rope(T* x_first_half, T* x_se
 }
 
 template <FragLayout frag_layout, typename T>
-__device__ __forceinline__ void q_frag_apply_llama_rope(
-    T* x_first_half, T* x_second_half, const float* rope_freq,
-    const uint32_t pre_group_division_offset, const uint32_t group_size, float scale = 1.f) {
+__device__ __forceinline__ void q_frag_apply_llama_rope(T* x_first_half, T* x_second_half,
+                                                        const float* rope_freq,
+                                                        const uint32_t pre_group_division_offset,
+                                                        const uint32_t group_size,
+                                                        float scale = 1.f) {
 #pragma unroll
   for (uint32_t reg_id = 0; reg_id < 8; ++reg_id) {
     float cos, sin, tmp;
@@ -129,9 +131,9 @@ __device__ __forceinline__ void q_frag_apply_llama_rope(
       i = reg_id / 4;
       j = (reg_id % 4) / 2;
     }
-    __sincosf(float((pre_group_divison_offset + 8 * i) / group_size) *
-                  rope_freq[2 * j + reg_id % 2],
-              &sin, &cos);
+    __sincosf(
+        float((pre_group_divison_offset + 8 * i) / group_size) * rope_freq[2 * j + reg_id % 2],
+        &sin, &cos);
     tmp = x_first_half[reg_id];
     x_first_half[reg_id] = (tmp * cos - (float)x_second_half[reg_id] * sin) * scale;
     x_second_half[reg_id] = ((float)x_second_half[reg_id] * cos + tmp * sin) * scale;
@@ -143,9 +145,8 @@ __device__ __forceinline__ void q_frag_apply_llama_rope_with_pos(
     T* x_first_half, T* x_second_half, const float* rope_freq,
     const uint32_t pre_group_division_offset, const uint32_t group_size, const IdType* q_offset,
     float scale = 1.f) {
-  float pos[2] = {
-      static_cast<float>(q_offset[pre_group_division_offset / group_size]),
-      static_cast<float>(q_offset[(pre_group_division_offset + 8) / group_size])};
+  float pos[2] = {static_cast<float>(q_offset[pre_group_division_offset / group_size]),
+                  static_cast<float>(q_offset[(pre_group_division_offset + 8) / group_size])};
 #pragma unroll
   for (uint32_t reg_id = 0; reg_id < 8; ++reg_id) {
     float cos, sin, tmp;
@@ -329,8 +330,10 @@ __device__ __forceinline__ void load_q_global_smem(uint32_t pre_group_division_o
 #pragma unroll
     for (uint32_t j = 0; j < 4; ++j) {
       const uint32_t q_idx = (pre_group_division_offset + tx / 8 + fx * 16 + j * 4) / group_size;
-      DTypeIn* q_ptr = q_ptr_base + ((pre_group_division_offset + tx / 8 + fx * 16 + j * 4) / group_size) * qo_n_stride +
-                       ((pre_group_division_offset + tx / 8 + fx * 16 + j * 4) % group_size) * qo_h_stride;
+      DTypeIn* q_ptr =
+          q_ptr_base +
+          ((pre_group_division_offset + tx / 8 + fx * 16 + j * 4) / group_size) * qo_n_stride +
+          ((pre_group_division_offset + tx / 8 + fx * 16 + j * 4) % group_size) * qo_h_stride;
 #pragma unroll
       for (uint32_t fyo = 0; fyo < num_frags_y / 4; ++fyo) {
         // load q fragment from gmem to smem
