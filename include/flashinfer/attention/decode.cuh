@@ -752,24 +752,25 @@ constexpr uint32_t get_heuristic_num_threads(uint32_t group_size, uint32_t sizeo
  * \param stream The cuda stream to launch the kernel
  * \return status Indicates whether CUDA calls are successful
  */
-template <uint32_t GROUP_SIZE, uint32_t HEAD_DIM, QKVLayout KV_LAYOUT,
+template <uint32_t HEAD_DIM, QKVLayout KV_LAYOUT,
           PosEncodingMode POS_ENCODING_MODE, typename DTypeIn, typename DTypeOut>
 cudaError_t SingleDecodeWithKVCacheDispatched(DTypeIn* q, DTypeIn* k, DTypeIn* v, DTypeOut* o,
-                                              DTypeOut* tmp, uint32_t num_kv_heads,
+                                              DTypeOut* tmp, uint32_t num_qo_heads, uint32_t num_kv_heads,
                                               uint32_t seq_len, float sm_scale, float rope_scale,
                                               float rope_theta, cudaStream_t stream) {
   const float rope_rcp_scale = 1.f / rope_scale;
   const float rope_rcp_theta = 1.f / rope_theta;
-  const uint32_t num_qo_heads = num_kv_heads * GROUP_SIZE;
   constexpr uint32_t vec_size = std::max(16UL / sizeof(DTypeIn), HEAD_DIM / 32UL);
   constexpr uint32_t num_stages_smem = 2U;
   constexpr uint32_t bdx = HEAD_DIM / vec_size;
   static_assert(bdx <= 32U);
-  constexpr uint32_t bdy = GROUP_SIZE;
+  const uint32_t group_size = num_qo_heads / num_kv_heads; 
+  constexpr uint32_t bdy = group_size;
   constexpr uint32_t num_threads =
-      std::max(get_heuristic_num_threads(GROUP_SIZE, sizeof(DTypeIn)), bdx * bdy);
+      std::max(get_heuristic_num_threads(group_size, sizeof(DTypeIn)), bdx * bdy);
   constexpr uint32_t bdz = num_threads / (bdx * bdy);
-  tensor_info_t<KV_LAYOUT, GROUP_SIZE, HEAD_DIM> info(1, seq_len, num_kv_heads);
+  tensor_info_t<KV_LAYOUT, HEAD_DIM> info(1, seq_len, num_qo_heads, num_kv_heads);
+  // TODO(Zihao): fix the following line
   constexpr uint32_t tile_size_per_bdx = GROUP_SIZE == 1 ? (sizeof(DTypeIn) == 1 ? 2U : 8U) : 1U;
   const uint32_t smem_size =
       2U * num_stages_smem * bdy * tile_size_per_bdx * bdz * HEAD_DIM * sizeof(DTypeIn) +
@@ -839,25 +840,27 @@ cudaError_t SingleDecodeWithKVCacheDispatched(DTypeIn* q, DTypeIn* k, DTypeIn* v
   return cudaSuccess;
 }
 
-template <uint32_t GROUP_SIZE, uint32_t HEAD_DIM, PageStorage page_storage, QKVLayout kv_layout,
+template <uint32_t HEAD_DIM, PageStorage page_storage, QKVLayout kv_layout,
           PosEncodingMode POS_ENCODING_MODE, typename DTypeIn, typename DTypeOut, typename IdType>
 cudaError_t BatchDecodeWithPagedKVCacheDispatched(
     DTypeIn* q, IdType* q_offset, paged_kv_t<page_storage, kv_layout, DTypeIn, IdType> paged_kv,
     kv_partition_info_t<IdType> kv_partition_info, DTypeOut* o, DTypeOut* tmp, float* lse,
+    uint32_t num_qo_heads,
     float sm_scale, float rope_scale, float rope_theta, cudaStream_t stream) {
   const float rope_rcp_scale = 1.f / rope_scale;
   const float rope_rcp_theta = 1.f / rope_theta;
   const uint32_t num_kv_heads = paged_kv.num_heads;
+  const uint32_t group_size = num_qo_heads / num_kv_heads;
   const uint32_t batch_size = paged_kv.batch_size;
-  const uint32_t num_qo_heads = num_kv_heads * GROUP_SIZE;
 
   constexpr uint32_t vec_size = std::max(16UL / sizeof(DTypeIn), HEAD_DIM / 32UL);
   constexpr uint32_t num_stages_smem = 2U;
   constexpr uint32_t bdx = HEAD_DIM / vec_size;
   static_assert(bdx <= 32);
-  constexpr uint32_t bdy = GROUP_SIZE;
+  constexpr uint32_t bdy = group_size;
   constexpr uint32_t num_threads = std::max(128U, bdx * bdy);
   constexpr uint32_t bdz = num_threads / (bdx * bdy);
+  // TODO(Zihao): fix this
   constexpr uint32_t tile_size_per_bdx = GROUP_SIZE == 1 ? (sizeof(DTypeIn) == 1 ? 2U : 4U) : 1U;
   const uint32_t smem_size =
       2 * num_stages_smem * tile_size_per_bdx * bdy * bdz * HEAD_DIM * sizeof(DTypeIn) +
@@ -932,22 +935,24 @@ cudaError_t BatchDecodeWithPagedKVCacheDispatched(
  * \param stream The cuda stream to launch the kernel
  * \return status Indicates whether CUDA calls are successful
  */
-template <uint32_t GROUP_SIZE, uint32_t HEAD_DIM, QKVLayout KV_LAYOUT,
+template <uint32_t HEAD_DIM, QKVLayout KV_LAYOUT,
           PosEncodingMode POS_ENCODING_MODE, typename DTypeIn, typename DTypeOut>
 cudaError_t BatchDecodeWithPaddedKVCacheDispatched(DTypeIn* q, DTypeIn* k, DTypeIn* v, DTypeOut* o,
                                                    DTypeOut* tmp, float* lse, uint32_t batch_size,
                                                    uint32_t padded_kv_len, uint32_t num_qo_heads,
+                                                   uint32_t num_kv_heads,
                                                    float sm_scale, float rope_scale,
                                                    float rope_theta, cudaStream_t stream) {
   const float rope_rcp_scale = 1.f / rope_scale;
   const float rope_rcp_theta = 1.f / rope_theta;
-  const uint32_t num_kv_heads = num_qo_heads / GROUP_SIZE;
+  const uint32_t group_size = num_qo_heads / num_kv_heads;
 
   constexpr uint32_t vec_size = std::max(16UL / sizeof(DTypeIn), HEAD_DIM / 32UL);
   constexpr uint32_t num_stages_smem = 2U;
   constexpr uint32_t bdx = HEAD_DIM / vec_size;
   static_assert(bdx <= 32);
-  constexpr uint32_t bdy = GROUP_SIZE;
+  // TODO(Zihao): fix this
+  constexpr uint32_t bdy = group_size;
   constexpr uint32_t num_threads = std::max(128U, bdx * bdy);
   constexpr uint32_t bdz = num_threads / (bdx * bdy);
 
@@ -960,7 +965,7 @@ cudaError_t BatchDecodeWithPaddedKVCacheDispatched(DTypeIn* q, DTypeIn* k, DType
                                                    vec_size, bdx, bdy, bdz, DTypeIn, DTypeOut>;
   FLASHINFER_CUDA_CALL(
       cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size));
-  tensor_info_t<KV_LAYOUT, GROUP_SIZE, HEAD_DIM> info(1, padded_kv_len, num_kv_heads);
+  tensor_info_t<KV_LAYOUT, HEAD_DIM> info(1, padded_kv_len, num_qo_heads, num_kv_heads);
   void* args[] = {(void*)&q,
                   (void*)&k,
                   (void*)&v,
