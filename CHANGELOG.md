@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.1.0](https://github.com/flashinfer-ai/flashinfer/compare/v0.0.4...v0.1.0) (2024-05-30)
+
+
+### Features
+
+* support custom attention mask in prefill/append attention kernels ([#266](https://github.com/flashinfer-ai/flashinfer/issues/266)) ([7304282](https://github.com/flashinfer-ai/flashinfer/commit/7304282a8068942100f8e59adff533ce28f4d3e5))
+
+
+### Performance Improvements
+
+* initial cuda graph support ([#256](https://github.com/flashinfer-ai/flashinfer/issues/256)) ([7e9cc7f](https://github.com/flashinfer-ai/flashinfer/commit/7e9cc7ff42ca283c317061a877305d09a395fad2))
+
 ## [0.0.4](https://github.com/flashinfer-ai/flashinfer/compare/v0.0.3...v0.1.0) (2024-05-01)
 
 
