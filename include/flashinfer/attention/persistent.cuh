@@ -431,7 +431,9 @@ struct BlockBatchReductionPersistent {
       // remap workload
       uint32_t packed_qo_idx = i / num_kv_heads;
       uint32_t kv_head_idx = i % num_kv_heads;
-      uint32_t qo_head_idx = packed_qo_idx % gqa_group_size;
+      uint32_t qo_head_idx =
+          packed_qo_idx %
+          gqa_group_size;  // This layout requires scheduler follows specific tile partition
 
       // index calculation
       auto partial_idx_to_offset = [&](uint32_t off) {
