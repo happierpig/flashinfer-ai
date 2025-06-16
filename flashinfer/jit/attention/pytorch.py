@@ -850,6 +850,7 @@ def gen_batch_prefill_module(
         fp8_enabled=fp8_enabled,
     )
 
+
 def gen_batch_attention_module(
     dtype_q: torch.dtype,
     dtype_kv: torch.dtype,
