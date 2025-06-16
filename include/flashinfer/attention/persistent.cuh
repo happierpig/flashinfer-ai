@@ -250,14 +250,16 @@ struct BlockBatchPagedAttentionPersistent {
 
       smem_t<SWIZZLE_MODE_KV> k_smem(smem_storage->k_smem), v_smem(smem_storage->v_smem);
       int kv_tile_idx =
-          ceil_div((CAUSAL ? min(kv_end, kv_len - q_len +
-                                             (packed_qo_start + cluster_tile_q) / gqa_group_size)
+          ceil_div((CAUSAL ? min(kv_end,
+                                 kv_len - q_len +
+                                     ceil_div((packed_qo_start + cluster_tile_q), gqa_group_size))
                            : kv_end),
                    CTA_TILE_KV) -
           1 - (kv_start / CTA_TILE_KV);
 
       int mask_tile_idx =
-          (CAUSAL ? min(kv_end, kv_len - q_len + packed_qo_start / gqa_group_size) : kv_end) /
+          (CAUSAL ? min(kv_end, kv_len - q_len + ceil_div(packed_qo_start, gqa_group_size))
+                  : kv_end) /
               CTA_TILE_KV -
           (kv_start / CTA_TILE_KV);
 

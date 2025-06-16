@@ -995,7 +995,7 @@ inline int packed_causal_kv_end(int qo_len, int kv_len, int qo_tile_idx, int clu
     return kv_len;
   }
   int kv_len_init = kv_len - qo_len;
-  return kv_len_init + (qo_tile_idx + 1) * cluster_tile_q / group_size;
+  return min(kv_len_init + ceil_div((qo_tile_idx + 1) * cluster_tile_q, group_size), kv_len);
 }
 
 template <uint32_t NUM_TASKS>
