@@ -144,7 +144,8 @@ struct BlockBatchPagedAttentionPersistent {
   using Params = Params_;
 
   static __device__ __forceinline__ void Run(const Params& params,
-                                             typename KTraits::SharedStorage* smem_storage) {
+                                             typename KTraits::SharedStorage* smem_storage
+                                                 PROFILER_CLOSURE_FUNC_PARAMS) {
     using DTypeQ = typename Params::DTypeQ;
     using DTypeKV = typename Params::DTypeKV;
     using DTypeO = typename Params::DTypeO;
@@ -225,6 +226,13 @@ struct BlockBatchPagedAttentionPersistent {
 #pragma unroll 1
     for (IdType work_idx = work_indptr[blockIdx.y]; work_idx < work_indptr[blockIdx.y + 1];
          ++work_idx) {
+      // profile log
+      if constexpr (CTA_TILE_Q > 64) {
+        PROFILER_EVENT_START(profiler_closure, PersistentProfileEventType::kRunner1);
+      } else {
+        PROFILER_EVENT_START(profiler_closure, PersistentProfileEventType::kRunner2);
+      }
+
       const auto [q_indptr, kv_indptr, o_indptr, q_len, kv_len, packed_qo_start, kv_start, kv_end,
                   kv_head_idx, len_kv_chunk] = get_block_coord(params, work_idx);
 
@@ -368,6 +376,12 @@ struct BlockBatchPagedAttentionPersistent {
           }
         }
       }
+      // profile log
+      if constexpr (CTA_TILE_Q > 64) {
+        PROFILER_EVENT_END(profiler_closure, PersistentProfileEventType::kRunner1);
+      } else {
+        PROFILER_EVENT_END(profiler_closure, PersistentProfileEventType::kRunner2);
+      }
     }
   }
 };
@@ -406,7 +420,7 @@ struct BlockBatchReductionPersistent {
       float* __restrict__ S, float* __restrict__ s_merged,
       const typename KTraits::IdType num_packed_qo_len, const uint_fastdiv gqa_group_size,
       const uint32_t num_kv_heads, const typename KTraits::IdType* indptr,
-      const typename KTraits::IdType* o_indices, uint8_t* smem) {
+      const typename KTraits::IdType* o_indices, uint8_t* smem PROFILER_CLOSURE_FUNC_PARAMS) {
     using DTypeIn = typename KTraits::DTypeIn;
     using DTypeO = typename KTraits::DTypeO;
     using IdType = typename KTraits::IdType;
@@ -430,6 +444,7 @@ struct BlockBatchReductionPersistent {
     // v_merged: [qo_len, num_kv_heads, gqa_group_size, head_dim]
 #pragma unroll 1
     for (uint32_t i = cta_id; i < num_packed_qo_len * num_kv_heads; i += num_ctas) {
+      PROFILER_EVENT_START(profiler_closure, PersistentProfileEventType::kReduction);
       // remap workload
       uint32_t packed_qo_idx = i / num_kv_heads;
       uint32_t kv_head_idx = i % num_kv_heads;
@@ -512,6 +527,7 @@ struct BlockBatchReductionPersistent {
       if (s_merged != nullptr) {
         s_merged[merge_idx_to_offset()] = st.get_lse();
       }
+      PROFILER_EVENT_END(profiler_closure, PersistentProfileEventType::kReduction);
     }
   }
 };
