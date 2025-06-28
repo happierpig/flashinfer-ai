@@ -471,6 +471,7 @@ struct BlockBatchReductionPersistent {
         if (s_merged != nullptr) {
           s_merged[merge_idx_to_offset()] = -math::inf;
         }
+        PROFILER_EVENT_END(profiler_closure, PersistentProfileEventType::kReduction);
         continue;
       }
 
@@ -481,6 +482,7 @@ struct BlockBatchReductionPersistent {
         if (s_merged != nullptr) {
           s_merged[merge_idx_to_offset()] = S[partial_idx_to_offset(0)];
         }
+        PROFILER_EVENT_END(profiler_closure, PersistentProfileEventType::kReduction);
         continue;
       }
 
