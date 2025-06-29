@@ -412,6 +412,7 @@ struct StateReductionKernelTraits {
   static constexpr uint32_t HEAD_DIM_VO = HEAD_DIM_VO_;
   static constexpr uint32_t NUM_SMEM_STAGES = NUM_SMEM_STAGES_;
   static constexpr uint32_t NUM_THREADS = NUM_THREADS_;
+  static constexpr uint32_t NUM_WARPS = NUM_THREADS / 32;
 
   static constexpr uint32_t vec_size = (16U / sizeof(DTypeIn)) > (HEAD_DIM_VO / 32U)
                                            ? (16U / sizeof(DTypeIn))
@@ -419,12 +420,14 @@ struct StateReductionKernelTraits {
   static constexpr uint32_t bdx = HEAD_DIM_VO / vec_size;
 
   // gridDim is accessed by runtime variable and should be set by core attention
+  // workload layout [bdx, bdy, num_warps]
   static_assert(NUM_THREADS % bdx == 0);
-  static constexpr uint32_t bdy = NUM_THREADS / bdx;
+  static constexpr uint32_t bdy = 32 / bdx;
 
   // pipeline load & reduction
   static constexpr size_t SMEM_SIZE =
-      NUM_SMEM_STAGES * bdy * HEAD_DIM_VO * sizeof(DTypeIn) + NUM_THREADS * sizeof(float);
+      NUM_WARPS * NUM_SMEM_STAGES * bdy * HEAD_DIM_VO * sizeof(DTypeIn) +
+      NUM_THREADS * sizeof(float);
 };
 
 template <typename KTraits_>
@@ -443,30 +446,35 @@ struct BlockBatchReductionPersistent {
 
     [[maybe_unused]] constexpr uint32_t bdx = KTraits::bdx;
     [[maybe_unused]] constexpr uint32_t bdy = KTraits::bdy;
+    [[maybe_unused]] constexpr uint32_t num_warps = KTraits::NUM_WARPS;
+
     [[maybe_unused]] constexpr uint32_t vec_size = KTraits::vec_size;
     [[maybe_unused]] constexpr uint32_t head_dim = KTraits::HEAD_DIM_VO;
     [[maybe_unused]] constexpr uint32_t num_smem_stages = KTraits::NUM_SMEM_STAGES;
     [[maybe_unused]] constexpr uint32_t vec_bits = sizeof(DTypeIn) * vec_size * 8;
 
     // control flow metadata
-    uint32_t tx = threadIdx.x % bdx, ty = threadIdx.x / bdx;
-    uint32_t cta_id = blockIdx.y;
-    uint32_t num_ctas = gridDim.x * gridDim.y * gridDim.z;
+    const uint32_t warp_idx = threadIdx.x / 32;
+    const uint32_t tx = (threadIdx.x % 32) % bdx, ty = (threadIdx.x % 32) / bdx;
 
-    DTypeIn* v_smem = (DTypeIn*)smem;
-    float* s_smem = (float*)(smem + num_smem_stages * bdy * head_dim * sizeof(DTypeIn));
+    const uint32_t worker_id = blockIdx.y * num_warps + warp_idx;
+    const uint32_t num_workers = gridDim.x * gridDim.y * gridDim.z * num_warps;
+
+    DTypeIn* v_smem = (DTypeIn*)smem + warp_idx * num_smem_stages * bdy * head_dim;
+    // FIXME: fix the offset calculation
+    float* s_smem = (float*)(smem + num_warps * num_smem_stages * bdy * head_dim * sizeof(DTypeIn) +
+                             warp_idx * 32 * sizeof(float));
 
     // V: [num_packed_qo_len x num_kv_tiles, num_kv_heads, head_dim]
     // v_merged: [qo_len, num_kv_heads, gqa_group_size, head_dim]
 #pragma unroll 1
-    for (uint32_t i = cta_id; i < num_packed_qo_len * num_kv_heads; i += num_ctas) {
+    for (uint32_t i = worker_id; i < num_packed_qo_len * num_kv_heads; i += num_workers) {
       PROFILER_EVENT_START(profiler_closure, PersistentProfileEventType::kReduction);
+
       // remap workload
       uint32_t packed_qo_idx = i / num_kv_heads;
       uint32_t kv_head_idx = i % num_kv_heads;
-      uint32_t qo_head_idx =
-          packed_qo_idx %
-          gqa_group_size;  // This layout requires scheduler follows specific tile partition
+      uint32_t qo_head_idx = packed_qo_idx % gqa_group_size;
 
       // index calculation
       auto partial_idx_to_offset = [&](uint32_t off) {
@@ -480,18 +488,7 @@ struct BlockBatchReductionPersistent {
       state_t<vec_size> st;
       const uint32_t num_index_sets = indptr[packed_qo_idx + 1] - indptr[packed_qo_idx];
 
-      if (num_index_sets == 0) {
-        vec_t<DTypeO, vec_size> v;
-        v.fill(DTypeO(0.f));
-        v.store(v_merged + merge_idx_to_offset() * head_dim + tx * vec_size);
-        if (s_merged != nullptr) {
-          s_merged[merge_idx_to_offset()] = -math::inf;
-        }
-        PROFILER_EVENT_END(profiler_closure, PersistentProfileEventType::kReduction);
-        continue;
-      }
-
-      if (num_index_sets == 1) {
+      if (num_index_sets == 0 || num_index_sets == 1) {
         // already write through, bypass
         PROFILER_EVENT_END(profiler_closure, PersistentProfileEventType::kReduction);
         continue;
@@ -511,17 +508,17 @@ struct BlockBatchReductionPersistent {
           s_smem[ty * bdx + tx] = iter * bdy + (ty * bdx + tx) < num_index_sets
                                       ? S[partial_idx_to_offset(iter * bdy + ty * bdx + tx)]
                                       : 0.f;
-          __syncthreads();
+          __syncwarp();
         }
         cp_async::wait_group<num_smem_stages - 1>();
-        __syncthreads();
+        __syncwarp();
         vec_t<float, vec_size> v;
         v.cast_load(v_smem + ((iter % num_smem_stages) * bdy + ty) * head_dim + tx * vec_size);
         if (iter * bdy + ty < num_index_sets) {
           float s = s_smem[(iter % bdx) * bdy + ty];
           st.merge(v, s, 1);
         }
-        __syncthreads();
+        __syncwarp();
         cp_async::pred_load<vec_bits, PrefetchMode::kPrefetch, SharedMemFillMode::kNoFill>(
             v_smem + ((iter % num_smem_stages) * bdy + ty) * head_dim + tx * vec_size,
             V + partial_idx_to_offset((iter + num_smem_stages) * bdy + ty) * head_dim +
@@ -530,10 +527,10 @@ struct BlockBatchReductionPersistent {
         cp_async::commit_group();
       }
       cp_async::wait_group<0>();
-      __syncthreads();
+      __syncwarp();
 
       st.normalize();
-      threadblock_sync_state<bdx, bdy, vec_size>(st, v_smem, s_smem, tx, ty);
+      warp_sync_state<bdx, bdy, vec_size>(st, v_smem, s_smem, tx, ty);
       st.normalize();
 
       st.o.cast_store(v_merged + merge_idx_to_offset() * head_dim + tx * vec_size);
