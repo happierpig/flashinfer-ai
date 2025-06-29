@@ -175,7 +175,6 @@ struct BlockBatchPagedAttentionPersistent {
     DTypeKV* k = params.k;
     DTypeKV* v = params.v;
     IdType* kv_indices = params.kv_indices;
-    DTypeO* partial_o = params.partial_o;
     float* partial_lse = params.partial_lse;
     IdType* work_indptr = params.work_indptr;
 
@@ -350,13 +349,22 @@ struct BlockBatchPagedAttentionPersistent {
       normalize_d<KTraits>(o_frag, m, d);
 
       // write back to global memory
-      // o_indptr: [packed_qo_len * num_kv_chunks, num_kv_heads, head_dim]
-      DTypeO* o_ptr_base =
-          partial_o + ((o_indptr + kv_chunk_idx) * num_kv_heads + kv_head_idx) * HEAD_DIM_VO;
-      write_o_<KTraits>(o_frag, &q_smem, o_ptr_base, qo_packed_idx_base, packed_qo_start,
-                        qo_upperbound, num_kv_chunks * num_kv_heads * HEAD_DIM_VO, gqa_group_size,
-                        warp_idx, lane_idx, tid);
-      // write lse to partial lse
+      // o_indptr (partial_o): [packed_qo_len * num_kv_chunks, num_kv_heads, head_dim]
+      // q_indpt (final_o): [qo_len, num_kv_heads, gqa_group_size, head_dim]
+      if (num_kv_chunks > 1) {
+        DTypeO* o_ptr_base = params.partial_o +
+                             ((o_indptr + kv_chunk_idx) * num_kv_heads + kv_head_idx) * HEAD_DIM_VO;
+        write_o_<KTraits>(o_frag, &q_smem, o_ptr_base, qo_packed_idx_base, packed_qo_start,
+                          qo_upperbound, num_kv_chunks * num_kv_heads * HEAD_DIM_VO, gqa_group_size,
+                          warp_idx, lane_idx, tid);
+      } else {
+        // write through
+        DTypeO* o_ptr_base =
+            params.final_o + q_indptr * q_stride_n + (kv_head_idx * gqa_group_size) * q_stride_h;
+        write_o_reg_gmem<KTraits>(o_frag, &q_smem, o_ptr_base, qo_packed_idx_base, q_len,
+                                  q_stride_n, q_stride_h, gqa_group_size, tid);
+      }
+
       if constexpr (variant.use_softmax) {
         if (get_warp_idx_kv<KTraits>(tid.z) == 0) {
 #pragma unroll
@@ -367,16 +375,24 @@ struct BlockBatchPagedAttentionPersistent {
               const uint32_t packed_qo_idx = qo_packed_idx_base + lane_idx / 4 + j * 8 + mma_q * 16;
               gqa_group_size.divmod(packed_qo_idx, q, r);
               if (q < qo_upperbound) {
-                partial_lse[(o_indptr + (packed_qo_idx - packed_qo_start) * num_kv_chunks +
-                             kv_chunk_idx) *
-                                num_kv_heads +
-                            kv_head_idx] = math::ptx_log2(d[mma_q][j]) + float(m[mma_q][j]);
+                if (num_kv_chunks > 1) {
+                  partial_lse[(o_indptr + (packed_qo_idx - packed_qo_start) * num_kv_chunks +
+                               kv_chunk_idx) *
+                                  num_kv_heads +
+                              kv_head_idx] = math::ptx_log2(d[mma_q][j]) + float(m[mma_q][j]);
+                } else if (params.final_lse != nullptr) {
+                  // write through
+                  const uint32_t qo_head_idx = kv_head_idx * gqa_group_size + r;
+                  params.final_lse[(q_indptr + q) * num_kv_heads * gqa_group_size + qo_head_idx] =
+                      math::ptx_log2(d[mma_q][j]) + float(m[mma_q][j]);
+                }
               }
             }
           }
         }
       }
-      // profile log
+
+      // profile
       if constexpr (CTA_TILE_Q > 64) {
         PROFILER_EVENT_END(profiler_closure, PersistentProfileEventType::kRunner1);
       } else {
@@ -476,12 +492,7 @@ struct BlockBatchReductionPersistent {
       }
 
       if (num_index_sets == 1) {
-        vec_t<DTypeO, vec_size> v;
-        v.cast_load(V + partial_idx_to_offset(0) * head_dim + tx * vec_size);
-        v.store(v_merged + merge_idx_to_offset() * head_dim + tx * vec_size);
-        if (s_merged != nullptr) {
-          s_merged[merge_idx_to_offset()] = S[partial_idx_to_offset(0)];
-        }
+        // already write through, bypass
         PROFILER_EVENT_END(profiler_closure, PersistentProfileEventType::kReduction);
         continue;
       }

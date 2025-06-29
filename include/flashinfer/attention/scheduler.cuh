@@ -1238,12 +1238,15 @@ inline cudaError_t TwoStageHolisticPlan(void* float_buffer, size_t float_workspa
             break;
           }
         }
-        for (int row = 0; row < row_tile_size; ++row) {
-          merge_indptr.push_back(merge_indptr.back() + num_kv_tiles);
-          merge_o_indices.push_back(qo_indptr_h[i] +
-                                    (qo_tile_idx * cluster_tile_q + row) / gqa_group_size);
+        if (split_kv) {
+          // non-split kv is directly written through
+          for (int row = 0; row < row_tile_size; ++row) {
+            merge_indptr.push_back(merge_indptr.back() + num_kv_tiles);
+            merge_o_indices.push_back(qo_indptr_h[i] +
+                                      (qo_tile_idx * cluster_tile_q + row) / gqa_group_size);
+          }
+          partial_o_nnz += row_tile_size * num_kv_tiles;
         }
-        partial_o_nnz += row_tile_size * num_kv_tiles;
       }
     }
 
