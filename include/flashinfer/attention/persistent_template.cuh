@@ -79,20 +79,20 @@ __global__ __launch_bounds__(
   BlockPersistentRunner1::Run(params_1, &smem_storage_1);
   BlockPersistentRunner2::Run(params_2, &smem_storage_2);
 
-  grid.sync();
   BlockReductionRunner::Run(params_1.partial_o, params_1.final_o, params_1.partial_lse,
                             params_1.final_lse, *(params_1.num_packed_qo_len),
                             params_1.gqa_group_size, params_1.num_kv_heads, params_1.merge_indptr,
-                            params_1.merge_o_indices, smem);
+                            params_1.merge_o_indices, smem, params_1.barrier_vec,
+                            params_1.merged_barrier_idx);
 #else
   BlockPersistentRunner1::Run(params_1, &smem_storage_1, profiler_closure);
   BlockPersistentRunner2::Run(params_2, &smem_storage_2, profiler_closure);
 
-  grid.sync();
   BlockReductionRunner::Run(params_1.partial_o, params_1.final_o, params_1.partial_lse,
                             params_1.final_lse, *(params_1.num_packed_qo_len),
                             params_1.gqa_group_size, params_1.num_kv_heads, params_1.merge_indptr,
-                            params_1.merge_o_indices, smem, profiler_closure);
+                            params_1.merge_o_indices, smem, params_1.barrier_vec,
+                            params_1.merged_barrier_idx, profiler_closure);
 #endif
 }
 }  // namespace flashinfer

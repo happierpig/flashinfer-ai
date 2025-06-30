@@ -76,10 +76,12 @@ struct PersistentParams {
   IdType* kv_head_idx_arr;
   IdType* work_indptr;
   IdType* len_kv_chunk;
+  uint32_t* barrier_idx;
 
   // for state reduction
   IdType* merge_indptr;
   IdType* merge_o_indices;
+  uint32_t* merged_barrier_idx;
   IdType* num_packed_qo_len;
 
   uint32_t num_kv_heads;
@@ -96,6 +98,8 @@ struct PersistentParams {
   uint32_t v_stride_n;
 
   float sm_scale;
+
+  uint32_t* barrier_vec;
 
   {{ additional_params_decl }}
 
