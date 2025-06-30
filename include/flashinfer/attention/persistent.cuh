@@ -575,8 +575,10 @@ struct BlockBatchReductionPersistent {
       __syncwarp();
 
       st.normalize();
-      warp_sync_state<bdx, bdy, vec_size>(st, v_smem, s_smem, tx, ty);
-      st.normalize();
+      if constexpr (bdy > 1) {
+        warp_sync_state<bdx, bdy, vec_size>(st, v_smem, s_smem, tx, ty);
+        st.normalize();
+      }
 
       st.o.cast_store(v_merged + merge_idx_to_offset() * head_dim + tx * vec_size);
       if (s_merged != nullptr) {

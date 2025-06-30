@@ -92,17 +92,38 @@ def profile_persistent_batch_attention(
         (profiler_buffer_size,), dtype=torch.uint64, device=device
     )
 
-    # warmup
-    wrapper.run(q, kv_data, profiler_buffer=profiler_buffer)
-    profiler_buffer.zero_()
-
-    wrapper.run(q, kv_data, profiler_buffer=profiler_buffer)
+    # do not warm up as barriers will be cleared
+    o_new, lse_new = wrapper.run(q, kv_data, profiler_buffer=profiler_buffer)
 
     trace_name = f"batch_attention.perfetto-trace"
     events = ["prefill", "decode", "reduction"]
     export_to_perfetto_trace(profiler_buffer, events, trace_name)
 
     print(f"Profile trace exported to {trace_name}")
+
+    # correctness check
+    wrapper_old = flashinfer.BatchPrefillWithPagedKVCacheWrapper(
+        torch.empty(128 * 1024 * 1024, dtype=torch.uint8, device=device),
+        kv_layout=layout,
+        backend="fa2",
+    )
+    last_page_len = (seq_lens - 1) % page_size + 1
+    wrapper_old.plan(
+        q_indptr.to(device),
+        kv_indptr.to(device),
+        torch.arange(num_blocks, device=device).int(),
+        last_page_len.to(device),
+        num_qo_heads,
+        num_kv_heads,
+        head_dim,
+        page_size,
+        causal=causal,
+        q_data_type=test_dtype,
+        kv_data_type=test_dtype,
+    )
+    out_old, lse_old = wrapper_old.run(q, kv_data, return_lse=True)
+
+    torch.testing.assert_close(o_new, out_old, rtol=1e-2, atol=1e-2)
 
 
 def persistent_batch_attention(
@@ -168,7 +189,32 @@ def persistent_batch_attention(
         q_data_type=test_dtype,
         kv_data_type=test_dtype,
     )
-    wrapper.run(q, kv_data)
+    o_new, lse_new = wrapper.run(q, kv_data)
+    torch.cuda.synchronize()
+
+    # correctness check
+    wrapper_old = flashinfer.BatchPrefillWithPagedKVCacheWrapper(
+        torch.empty(128 * 1024 * 1024, dtype=torch.uint8, device=device),
+        kv_layout=layout,
+        backend="fa2",
+    )
+    last_page_len = (seq_lens - 1) % page_size + 1
+    wrapper_old.plan(
+        q_indptr.to(device),
+        kv_indptr.to(device),
+        torch.arange(num_blocks, device=device).int(),
+        last_page_len.to(device),
+        num_qo_heads,
+        num_kv_heads,
+        head_dim,
+        page_size,
+        causal=causal,
+        q_data_type=test_dtype,
+        kv_data_type=test_dtype,
+    )
+    out_old, lse_old = wrapper_old.run(q, kv_data, return_lse=True)
+
+    torch.testing.assert_close(o_new, out_old, rtol=1e-2, atol=1e-2)
 
 
 if __name__ == "__main__":
