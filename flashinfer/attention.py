@@ -72,6 +72,8 @@ class BatchAttention:
         head_dim_qk: int,
         head_dim_vo: int,
         page_size: int,
+        num_layers: int,
+        layer_idx: torch.Tensor,
         causal: bool = False,
         sm_scale: float = None,
         q_data_type: torch.dtype = torch.bfloat16,
@@ -109,6 +111,10 @@ class BatchAttention:
         # No addtional buf allocated for CUDA graph tensor
         # Allocate outside FlashInfer
         self._kv_indices = kv_indices
+
+        #NOTE(brian1009): For assisting kv_indices loading
+        self._layer_idx = layer_idx
+        self._num_layers = num_layers
 
         self._plan_info = self.module.plan(
             self.float_workspace_buffer,
@@ -160,12 +166,14 @@ class BatchAttention:
             v_cache,
             self._kv_indices,
             out,
+            self._layer_idx,
             lse,
             self._mask_mode,
             TensorLayout[self._kv_layout].value,
             self._num_qo_heads,
             self._num_kv_heads,
             self._page_size,
+            self._num_layers,
             self._sm_scale,
             *profiler_args,
         )

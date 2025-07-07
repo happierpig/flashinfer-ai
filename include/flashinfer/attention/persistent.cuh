@@ -174,7 +174,8 @@ struct BlockBatchPagedAttentionPersistent {
     DTypeQ* q = params.q;
     DTypeKV* k = params.k;
     DTypeKV* v = params.v;
-    IdType* kv_indices = params.kv_indices;
+    const uint32_t kv_indices_stride = params.kv_indices_stride;
+    IdType* kv_indices = params.kv_indices + params.layer_idx[0] * kv_indices_stride;
     float* partial_lse = params.partial_lse;
     IdType* work_indptr = params.work_indptr;
 
