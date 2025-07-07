@@ -95,6 +95,7 @@ def _run_attention(
     logits_soft_cap=0.0,
     device="cuda",
     causal=True,
+    is_per_head_indices=False,
 ):
     """
     Run both implementations and return (output_old, lse_old, output_new, lse_new)
@@ -163,16 +164,22 @@ def _run_attention(
 
     # --------- new / mixed scheduler --------- #
     wrapper = flashinfer.BatchAttention(kv_layout=layout)
+    if is_per_head_indices:
+        kv_indices = torch.arange(num_blocks, device=dev).int().unsqueeze(0).expand(num_kv_heads, -1).unsqueeze(0)
+    else:
+        kv_indices = torch.arange(num_blocks, device=dev).int()
     wrapper.plan(
-        q_indptr,
-        kv_indptr,
-        torch.arange(num_blocks, device=dev).int(),
-        seq_lens,
+        q_indptr.to(dev),
+        kv_indptr.to(dev),
+        kv_indices,
+        seq_lens.to(dev),
         num_qo_heads,
         num_kv_heads,
         head_dim,
         head_dim,
         page_block_size,
+        layer_idx=torch.tensor(0, device=dev),
+        is_per_head_indices=is_per_head_indices,
         causal=causal,
         q_data_type=test_dtype,
         kv_data_type=test_dtype,
@@ -195,6 +202,7 @@ def _run_attention(
 @pytest.mark.parametrize("layout", ["HND", "NHD"])
 @pytest.mark.parametrize("test_dtype", [torch.bfloat16, torch.float16])
 @pytest.mark.parametrize("logits_soft_cap", [0.0, 50.0])
+@pytest.mark.parametrize("is_per_head_indices", [True, False])
 def test_batch_attention_correctness(
     seq_len_pairs,
     page_block_size,
@@ -205,6 +213,7 @@ def test_batch_attention_correctness(
     layout,
     test_dtype,
     logits_soft_cap,
+    is_per_head_indices,
 ):
     num_qo_heads = num_kv_heads * gqa_group_size
     kv_lens = [p[0] for p in seq_len_pairs]
@@ -222,6 +231,7 @@ def test_batch_attention_correctness(
         test_dtype=test_dtype,
         logits_soft_cap=logits_soft_cap,
         device="cuda",
+        is_per_head_indices=is_per_head_indices,
     )
 
 

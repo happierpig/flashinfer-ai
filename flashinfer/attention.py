@@ -29,7 +29,6 @@ from .utils import (
     _unpack_paged_kv_cache,
 )
 
-
 @functools.cache
 def get_holistic_attention_module(*args):
     return gen_batch_attention_module(*args).build_and_load()
@@ -65,19 +64,22 @@ class BatchAttention:
         self,
         qo_indptr: torch.Tensor,
         kv_indptr: torch.Tensor,
-        kv_indices: torch.Tensor,
+        kv_indices: torch.Tensor, # (num_layers, kv_heads, total_kv_indices) or (kv_heads, total_kv_indices)
         kv_len_arr: torch.Tensor,
         num_qo_heads: int,
         num_kv_heads: int,
         head_dim_qk: int,
         head_dim_vo: int,
         page_size: int,
+        layer_idx: torch.Tensor, # a 0-D tensors, buffer for deciding which layers of per-head kv indices to use
         causal: bool = False,
+        is_per_head_indices: bool = False,
         sm_scale: float = None,
         logits_soft_cap: Optional[float] = None,
         q_data_type: torch.dtype = torch.bfloat16,
         kv_data_type: torch.dtype = torch.bfloat16,
         use_profiler: bool = False,
+        add_layer_idx_by_one_after_run: bool = False,
     ) -> None:
         if logits_soft_cap is None:
             logits_soft_cap = 0.0
@@ -115,6 +117,18 @@ class BatchAttention:
         # No addtional buf allocated for CUDA graph tensor
         # Allocate outside FlashInfer
         self._kv_indices = kv_indices
+
+        #NOTE(brian1009): For assisting kv_indices loading.
+        #IMPORTANT!!!!!!!!!!!!!!
+        #If kv_indices is a 2D tensor, the user should make sure that the layer_idx should not exceed self._kv_indices.shape[0].
+        #If the layer_idx exceeds self._kv_indices.shape[0], the behavior is undefined.
+        #If kv_indices is a 1D tensor, the user should make sure that the layer_idx should not exceed self._kv_indices.shape[0].
+        #Then make sure that the layer_idx is always 0.
+        self._layer_idx = layer_idx
+        # If set, the self._layer_idx will be in-place added by one after each call of run()
+        self._add_layer_idx_by_one_after_run = add_layer_idx_by_one_after_run
+        self._is_per_head_indices = is_per_head_indices
+
         self._plan_info = self.module.plan(
             self.float_workspace_buffer,
             self.int_workspace_buffer,
@@ -172,6 +186,8 @@ class BatchAttention:
             v_cache,
             self._kv_indices,
             out,
+            self._layer_idx,
+            self._is_per_head_indices,
             lse,
             self._mask_mode,
             TensorLayout[self._kv_layout].value,
@@ -185,4 +201,9 @@ class BatchAttention:
             *profiler_args,
         )
 
+        if self._add_layer_idx_by_one_after_run:
+            # inplace adding one.
+            self._layer_idx.add_(1)
+
         return out, lse
+
