@@ -65,11 +65,10 @@ at::Tensor BatchPagedAttentionPlan(at::Tensor float_workspace_buffer,
 
 void BatchPagedAttentionRun(at::Tensor float_workspace_buffer, at::Tensor int_workspace_buffer,
                             at::Tensor plan_info_vec, at::Tensor q, at::Tensor k_cache,
-                            at::Tensor v_cache, at::Tensor kv_indices, at::Tensor o,
-                            std::optional<at::Tensor> maybe_lse, int64_t mask_mode_code,
+                            at::Tensor v_cache, at::Tensor kv_indices, at::Tensor o, 
+                            at::Tensor layer_idx, std::optional<at::Tensor> maybe_lse, int64_t mask_mode_code,
                             int64_t layout_code, int64_t num_qo_heads, int64_t num_kv_heads,
-                            int64_t page_size,
-                            double sm_scale ADDITIONAL_FUNC_PARAMS PROFILER_FUNC_PARAMS) {
+                            int64_t page_size, double sm_scale ADDITIONAL_FUNC_PARAMS PROFILER_FUNC_PARAMS) {
   HolisticPlanInfo<2> plan_info;
   plan_info.FromVector(tensor_to_vec(plan_info_vec));
 
@@ -103,6 +102,9 @@ void BatchPagedAttentionRun(at::Tensor float_workspace_buffer, at::Tensor int_wo
     v_stride_h = v_cache.stride(1);
     v_stride_n = v_cache.stride(2);
   }
+
+  //NOTE(brian1009): For assigning kv_indices loading
+  unsigned int kv_indices_stride = kv_indices.stride(0);
 
   const c10::cuda::OptionalCUDAGuard device_guard(device);
   const cudaStream_t stream = c10::cuda::getCurrentCUDAStream();
@@ -172,6 +174,9 @@ void BatchPagedAttentionRun(at::Tensor float_workspace_buffer, at::Tensor int_wo
 
           params[i].sm_scale = sm_scale;
 
+          //NOTE(brian1009): For assigting kv_indices loading
+          params[i].layer_idx = static_cast<int*>(layer_idx.data_ptr());
+          params[i].kv_indices_stride = kv_indices_stride;
           ADDITIONAL_PARAMS_SETTER
           PROFILER_PARAMS_SETTER
         }
