@@ -1,6 +1,6 @@
 import torch
 import triton
-from .kernels.batch_attn_utils import _augment_head_major_kernel
+from .kernels.batch_attn_utils import _augment_head_major_kernel, _augment_head_major_3d_kernel
 
 def augment_head_major_triton_3d(
     per_head_kv_indices: torch.Tensor,  # (num_layers, num_kv_heads, total_indices)

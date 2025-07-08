@@ -106,9 +106,10 @@ def generate_test_data(
     (2048, 128),  # Medium
     (8192, 256),  # Large
 ])
+@pytest.mark.parametrize("use_triton", [True, False])
 def test_golden_reference(
     batch_size, num_kv_heads, num_qo_heads, head_dim, 
-    causal, dtype, max_seq_len, max_q_len, device="cuda"
+    causal, dtype, max_seq_len, max_q_len, use_triton, device="cuda"
 ):
     """Test wrapper against golden reference by running each KV head separately"""
     seed = 42
@@ -141,7 +142,7 @@ def test_golden_reference(
         causal=causal,
         q_data_type=dtype,
         kv_data_type=dtype,
-        use_triton=False,
+        use_triton=use_triton,
         add_layer_idx_by_one_after_run=True
     )
     output_wrapper, lse_wrapper = batch_attention_wrapper.run(
