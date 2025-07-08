@@ -67,14 +67,13 @@ class BatchAttention:
         self,
         qo_indptr: torch.Tensor,
         kv_indptr: torch.Tensor,
-        kv_indices: torch.Tensor,
+        kv_indices: torch.Tensor, # (num_layers, total_kv_indices)
         kv_len_arr: torch.Tensor,
         num_qo_heads: int,
         num_kv_heads: int,
         head_dim_qk: int,
         head_dim_vo: int,
         page_size: int,
-        num_layers: int,
         layer_idx: torch.Tensor, # a 0-D tensors, buffer for deciding which layers of per-head kv indices to use
         causal: bool = False,
         sm_scale: float = None,
@@ -117,10 +116,9 @@ class BatchAttention:
 
         #NOTE(brian1009): For assisting kv_indices loading.
         #IMPORTANT!!!!!!!!!!!!!!
-        #The user should make sure that the layer_idx should not exceed num_layers.
-        #If the layer_idx exceeds num_layers, the behavior is undefined.
+        #The user should make sure that the layer_idx should not exceed self._kv_indices.shape[0].
+        #If the layer_idx exceeds self._kv_indices.shape[0], the behavior is undefined.
         self._layer_idx = layer_idx
-        self._num_layers = num_layers
         # If set, the self._layer_idx will be in-place added by one after each call of run()
         self._add_layer_idx_by_one_after_run = add_layer_idx_by_one_after_run
 
@@ -182,7 +180,6 @@ class BatchAttention:
             self._num_qo_heads,
             self._num_kv_heads,
             self._page_size,
-            self._num_layers,
             self._sm_scale,
             *profiler_args,
         )
@@ -225,7 +222,6 @@ class BatchAttentionWithPerHeadSelectPagedKVCacheWrapper:
         head_dim_qk: int,
         head_dim_vo: int,
         layer_idx: torch.Tensor,                          # a 0-D tensors, buffer for deciding which layers of per-head kv indices to use
-        num_layers: int,
         page_block_size: int = 1,
         causal: bool = True,
         q_data_type: torch.dtype = torch.bfloat16,
@@ -325,7 +321,6 @@ class BatchAttentionWithPerHeadSelectPagedKVCacheWrapper:
             head_dim_qk,               # head dimension
             head_dim_vo,               # head dimension for values
             page_block_size,
-            num_layers=num_layers,
             layer_idx=layer_idx,
             causal=causal,
             q_data_type=q_data_type, 
@@ -349,6 +344,9 @@ class BatchAttentionWithPerHeadSelectPagedKVCacheWrapper:
             output: Attention output (total_query_tokens, num_qo_heads, head_dim)
             lse: Log-sum-exp values
         """
+        # NOTE(brian1009): defer import following flashinfer/sparse.py
+        import einops
+
         key, value = paged_kv_cache
         total_query_tokens, num_qo_heads, head_dim = query.shape
         total_blocks, page_block_size, num_kv_heads, _ = key.shape
@@ -365,9 +363,15 @@ class BatchAttentionWithPerHeadSelectPagedKVCacheWrapper:
         # PHASE 2: Query Transformation to Head-Major Layout
         # =====================================================================================
         # Same transformation as prefill wrapper
-        query_reshaped = query.view(total_query_tokens, num_kv_heads, gqa_group_size, head_dim)
-        query_permuted = query_reshaped.permute(1, 0, 2, 3).contiguous()  # (num_kv_heads, total_tokens, gqa_group_size, head_dim)
-        query_for_flashinfer = query_permuted.reshape(-1, gqa_group_size, head_dim)
+        
+        # Using einops for clearer dimension rearrangement
+        query_for_flashinfer = einops.rearrange(
+            query,
+            'tokens (kv_heads group_size) head_dim -> (kv_heads tokens) group_size head_dim',
+            tokens=total_query_tokens,
+            kv_heads=num_kv_heads,
+            group_size=gqa_group_size
+        ).contiguous()
         
         # =====================================================================================
         # PHASE 3: Run Attention
@@ -378,18 +382,22 @@ class BatchAttentionWithPerHeadSelectPagedKVCacheWrapper:
         # =====================================================================================
         # PHASE 4: Reshape Output Back
         # =====================================================================================
-        # Reverse transformation
-        # (num_kv_heads * total_tokens, gqa_group_size, head_dim) ->
-        # (num_kv_heads, total_tokens, gqa_group_size, head_dim)
-        output_reshaped = output.view(num_kv_heads, total_query_tokens, gqa_group_size, head_dim)
-        # Permute back: (total_tokens, num_kv_heads, gqa_group_size, head_dim)
-        output_permuted = output_reshaped.permute(1, 0, 2, 3).contiguous()
-        # Reshape to final format: (total_tokens, num_qo_heads, head_dim)
-        output_final = output_permuted.reshape(total_query_tokens, num_qo_heads, head_dim)
+        # Reverse transformation using einops
+        output_final = einops.rearrange(
+            output,
+            '(kv_heads tokens) group_size head_dim -> tokens (kv_heads group_size) head_dim',
+            kv_heads=num_kv_heads,
+            tokens=total_query_tokens,
+            group_size=gqa_group_size
+        ).contiguous()
         
         # Similar for LSE
-        lse_reshaped = lse.view(num_kv_heads, total_query_tokens, gqa_group_size)
-        lse_permuted = lse_reshaped.permute(1, 0, 2).contiguous()
-        lse_final = lse_permuted.reshape(total_query_tokens, num_qo_heads)
+        lse_final = einops.rearrange(
+            lse,
+            '(kv_heads tokens) group_size -> tokens (kv_heads group_size)',
+            kv_heads=num_kv_heads,
+            tokens=total_query_tokens,
+            group_size=gqa_group_size
+        )
         
         return output_final, lse_final

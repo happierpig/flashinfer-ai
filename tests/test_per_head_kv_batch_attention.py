@@ -137,7 +137,6 @@ def test_golden_reference(
         head_dim_qk=head_dim,
         head_dim_vo=head_dim,
         layer_idx=layer_idx_buffer, # a 0-D tensors
-        num_layers=1,
         page_block_size=data['page_block_size'],
         causal=causal,
         q_data_type=dtype,
@@ -180,7 +179,6 @@ def test_golden_reference(
             head_dim,
             head_dim,
             data['page_block_size'],
-            num_layers=1,
             layer_idx=torch.tensor(0, device=device), # a 0-D tensors
             causal=causal,
             q_data_type=dtype,
@@ -233,7 +231,6 @@ def test_golden_reference_with_sparsity(sparsity_ratio, device="cuda"):
         head_dim_qk=head_dim,
         head_dim_vo=head_dim,
         layer_idx=torch.tensor(0, device=device), # a 0-D tensors
-        num_layers=1,
         page_block_size=data['page_block_size'],
         causal=causal,
         q_data_type=dtype,
@@ -270,7 +267,6 @@ def test_golden_reference_with_sparsity(sparsity_ratio, device="cuda"):
             head_dim,
             head_dim,
             data['page_block_size'],
-            num_layers=1,
             layer_idx=torch.tensor(0, device=device), # a 0-D tensors
             causal=causal,
             q_data_type=dtype,
@@ -296,7 +292,7 @@ def test_golden_reference_with_sparsity(sparsity_ratio, device="cuda"):
 @pytest.mark.parametrize("head_dim", [128])
 @pytest.mark.parametrize("causal", [True])
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
-@pytest.mark.parametrize("num_layers", [2, 3])
+@pytest.mark.parametrize("num_layers", [2, 4, 8, 16, 32])
 def test_per_layer_correctness(
     batch_size, num_kv_heads, num_qo_heads, head_dim, 
     causal, dtype, num_layers, device="cuda"
@@ -330,7 +326,6 @@ def test_per_layer_correctness(
             head_dim_qk=head_dim,
             head_dim_vo=head_dim,
             layer_idx=torch.tensor(0, device=device), # a 0-D tensors
-            num_layers=1,
             page_block_size=data['page_block_size'],
             causal=causal,
             q_data_type=dtype,
@@ -359,7 +354,6 @@ def test_per_layer_correctness(
         head_dim_qk=head_dim,
         head_dim_vo=head_dim,
         layer_idx=layer_idx_buffer, # a 0-D tensors
-        num_layers=num_layers,
         page_block_size=data['page_block_size'],
         causal=causal,
         q_data_type=dtype,
@@ -416,7 +410,6 @@ def test_per_layer_correctness_with_cuda_graph(num_layers, device="cuda"):
         head_dim_qk=head_dim,
         head_dim_vo=head_dim,
         layer_idx=layer_idx_buffer, # a 0-D tensors
-        num_layers=num_layers,
         page_block_size=data['page_block_size'],
         causal=causal,
         q_data_type=dtype,
@@ -448,7 +441,6 @@ def test_per_layer_correctness_with_cuda_graph(num_layers, device="cuda"):
         head_dim_qk=head_dim,
         head_dim_vo=head_dim,
         layer_idx=layer_idx_buffer_cg, # a 0-D tensors
-        num_layers=num_layers,
         page_block_size=data['page_block_size'],
         causal=causal,
         q_data_type=dtype,
