@@ -67,7 +67,7 @@ class BatchAttention:
         self,
         qo_indptr: torch.Tensor,
         kv_indptr: torch.Tensor,
-        kv_indices: torch.Tensor, # (num_layers, total_kv_indices)
+        kv_indices: torch.Tensor, # (num_layers, total_kv_indices) or (total_kv_indices)
         kv_len_arr: torch.Tensor,
         num_qo_heads: int,
         num_kv_heads: int,
@@ -116,8 +116,10 @@ class BatchAttention:
 
         #NOTE(brian1009): For assisting kv_indices loading.
         #IMPORTANT!!!!!!!!!!!!!!
-        #The user should make sure that the layer_idx should not exceed self._kv_indices.shape[0].
+        #If kv_indices is a 2D tensor, the user should make sure that the layer_idx should not exceed self._kv_indices.shape[0].
         #If the layer_idx exceeds self._kv_indices.shape[0], the behavior is undefined.
+        #If kv_indices is a 1D tensor, the user should make sure that the layer_idx should not exceed self._kv_indices.shape[0].
+        #Then make sure that the layer_idx is always 0.
         self._layer_idx = layer_idx
         # If set, the self._layer_idx will be in-place added by one after each call of run()
         self._add_layer_idx_by_one_after_run = add_layer_idx_by_one_after_run
