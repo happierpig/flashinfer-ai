@@ -142,6 +142,7 @@ def _run_attention(
         head_dim,
         head_dim,
         page_block_size,
+        layer_idx=torch.tensor(0, device=dev),
         causal=causal,
         q_data_type=test_dtype,
         kv_data_type=test_dtype,

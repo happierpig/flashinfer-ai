@@ -291,7 +291,7 @@ def test_golden_reference_with_sparsity(sparsity_ratio, device="cuda"):
 ])
 @pytest.mark.parametrize("head_dim", [128])
 @pytest.mark.parametrize("causal", [True])
-@pytest.mark.parametrize("dtype", [torch.bfloat16])
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
 @pytest.mark.parametrize("num_layers", [2, 4, 8, 16, 32])
 def test_per_layer_correctness(
     batch_size, num_kv_heads, num_qo_heads, head_dim, 
