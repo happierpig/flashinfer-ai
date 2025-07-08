@@ -280,8 +280,6 @@ class BatchAttentionWithPerHeadSelectPagedKVCacheWrapper:
             try:
                 augmented_indices = augment_head_major_triton(
                     per_head_kv_indices=all_layers_per_head_kv_indices,
-                    kv_indptr=kv_indptr,
-                    output_offsets=output_offsets,
                     device=str(self.device)
                 )
             except (ImportError, RuntimeError):

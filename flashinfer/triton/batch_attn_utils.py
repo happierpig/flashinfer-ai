@@ -49,8 +49,6 @@ def augment_head_major_triton_3d(
 
 def augment_head_major_triton(
     per_head_kv_indices: torch.Tensor,  # (num_kv_heads, total_indices) or (num_layers, num_kv_heads, total_indices)
-    kv_indptr: torch.Tensor,            # Not used in this kernel, kept for API compatibility
-    output_offsets: torch.Tensor,       # Not used in this kernel, kept for API compatibility
     device: str = "cuda"
 ) -> torch.Tensor:
     """
@@ -65,8 +63,6 @@ def augment_head_major_triton(
         per_head_kv_indices: Input indices for each head 
                            - 2D: (num_kv_heads, total_indices)
                            - 3D: (num_layers, num_kv_heads, total_indices)
-        kv_indptr: Batch boundaries (kept for API compatibility, not used)
-        output_offsets: Virtual batch offsets (kept for API compatibility, not used)
         device: Device to run on
         
     Returns:
