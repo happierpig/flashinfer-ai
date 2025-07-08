@@ -398,6 +398,6 @@ class BatchAttentionWithPerHeadSelectPagedKVCacheWrapper:
             kv_heads=num_kv_heads,
             tokens=total_query_tokens,
             group_size=gqa_group_size
-        )
+        ).contiguous()
         
         return output_final, lse_final
