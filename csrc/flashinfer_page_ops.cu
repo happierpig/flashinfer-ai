@@ -20,6 +20,12 @@ void append_paged_kv_cache(at::Tensor append_key, at::Tensor append_value, at::T
                            at::Tensor kv_indices, at::Tensor kv_indptr, at::Tensor kv_last_page_len,
                            int64_t layout);
 
+void append_paged_kv_cache_graph(at::Tensor append_key, at::Tensor append_value,
+                                 at::Tensor batch_indices, at::Tensor positions, at::Tensor nnz,
+                                 at::Tensor paged_k_cache, at::Tensor paged_v_cache,
+                                 at::Tensor kv_indices, at::Tensor kv_indptr,
+                                 at::Tensor kv_last_page_len, int64_t layout);
+
 void append_paged_mla_kv_cache(at::Tensor append_ckv, at::Tensor append_kpe,
                                at::Tensor batch_indices, at::Tensor positions, at::Tensor ckv_cache,
                                at::Tensor kpe_cache, at::Tensor kv_indices, at::Tensor kv_indptr,
@@ -33,6 +39,8 @@ void block_sparse_indices_to_vector_sparse_offsets(
 TORCH_LIBRARY_FRAGMENT(TORCH_EXTENSION_NAME, m) {
   // "Append paged KV-Cache operator"
   m.def("append_paged_kv_cache", append_paged_kv_cache);
+  // "Cuda-graph compatible append paged KV-Cache operator"
+  m.def("append_paged_kv_cache_graph", append_paged_kv_cache_graph);
   // "Append paged MLA KV-Cache operator"
   m.def("append_paged_mla_kv_cache", append_paged_mla_kv_cache);
   // "Precompute block sparse offsets"
