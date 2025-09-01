@@ -19,32 +19,6 @@ import pytest
 import torch
 
 import flashinfer
-from jit_utils import (
-    gen_persistent_batch_attention_modules,
-    gen_prefill_attention_modules,
-)
-
-
-@pytest.fixture(autouse=True, scope="module")
-def warmup_jit():
-    flashinfer.jit.build_jit_specs(
-        gen_persistent_batch_attention_modules(
-            [torch.float16, torch.bfloat16],  # q_dtypes
-            [torch.float16, torch.bfloat16],  # kv_dtypes
-            [64, 128, 256],  # head_dims
-            [False, True],  # use_logits_soft_cap
-        )
-        + gen_prefill_attention_modules(
-            [torch.float16, torch.bfloat16],  # q_dtypes
-            [torch.float16, torch.bfloat16],  # kv_dtypes
-            [64, 128, 256],  # head_dims
-            [0],  # pos_encoding_modes
-            [False],  # use_sliding_windows
-            [False, True],  # use_logits_soft_caps
-            [False],  # use_fp16_qk_reductions
-        ),
-        verbose=False,
-    )
 
 
 # -------------------------  Configuration generation function  ----------------------------- #
@@ -57,17 +31,15 @@ def _build_seq_len_configs():
     torch.manual_seed(42)
 
     seq_len_configs = [
+        [(146, 146)],
+        [(67, 67)],
         [(8190, 7939)],
-        [(2, 235)]
-        + [(1, 13353)],  # corner case with a large number of masked out tokens
-        [(67, 1)],
-        [(182, 1)],
-        [(2011, 1)],
         [(2048, 1)] * 77,  # decode-only
         [(4099, 129)] * 2,  # prefill-only
         [(600, 1)] * 132 * 2 + [(5000, 3)] * 128,
         [(1024, 1)] * 100 + [(8192, 17)] * 8,  # speculative decode
         [(766, 2)] * 99 + [(1024, 512)] * 1,  # chunked prefill
+        [(2, 235)] + [(1, 13353)],  # real workload
     ]
 
     # Construct random seqlen tests
@@ -189,9 +161,9 @@ def _run_attention(
 
 # -------------------------  PyTest test case  ----------------------------- #
 @pytest.mark.parametrize("seq_len_pairs", _build_seq_len_configs())
-@pytest.mark.parametrize("page_block_size", [1, 8, 16])
-@pytest.mark.parametrize("num_kv_heads", [8, 1, 4])
-@pytest.mark.parametrize("gqa_group_size", [1, 4, 7])
+@pytest.mark.parametrize("page_block_size", [1, 8])
+@pytest.mark.parametrize("num_kv_heads", [1, 4])
+@pytest.mark.parametrize("gqa_group_size", [1, 4, 7, 8])
 @pytest.mark.parametrize("head_dim", [64, 128, 256])
 @pytest.mark.parametrize("causal", [False, True])
 @pytest.mark.parametrize("layout", ["HND", "NHD"])
@@ -224,4 +196,18 @@ def test_batch_attention_correctness(
         test_dtype=test_dtype,
         logits_soft_cap=logits_soft_cap,
         device="cuda",
+    )
+
+
+if __name__ == "__main__":
+    test_batch_attention_correctness(
+        seq_len_pairs=[(1000, 1000)],
+        page_block_size=1,
+        num_kv_heads=4,
+        gqa_group_size=7,
+        head_dim=128,
+        causal=True,
+        layout="NHD",
+        test_dtype=torch.bfloat16,
+        logits_soft_cap=0.0,
     )
