@@ -413,10 +413,132 @@ def test_mla_rope_quantize(
     )
 
 
+@pytest.mark.parametrize("batch_size", [1, 19, 99, 989])
+@pytest.mark.parametrize("qkv_len", [1, 4, 19, 204])
+@pytest.mark.parametrize("num_qo_heads", [8, 16])
+@pytest.mark.parametrize("num_kv_heads", [8])
+@pytest.mark.parametrize("offset", [0, 15, 99])
+@pytest.mark.parametrize("head_dim", [64, 128, 256])
+@pytest.mark.parametrize("partial_rotary_factor", [0.25, 0.5, 0.75, 1.0])
+@pytest.mark.parametrize("use_graph", [True, False])
+def test_rope_persistent(
+    batch_size,
+    qkv_len,
+    num_qo_heads,
+    num_kv_heads,
+    offset,
+    head_dim,
+    partial_rotary_factor,
+    use_graph,
+):
+    rotary_dim = int(head_dim * partial_rotary_factor)
+    nnz = batch_size * qkv_len
+    qkv_packed = torch.randn(
+        nnz,
+        (num_qo_heads + 2 * num_kv_heads) * head_dim,
+        dtype=torch.float16,
+        device="cuda:0",
+    )
+    q = qkv_packed[:, : num_qo_heads * head_dim].reshape(nnz, num_qo_heads, head_dim)
+    k = qkv_packed[
+        :, num_qo_heads * head_dim : (num_qo_heads + num_kv_heads) * head_dim
+    ].reshape(nnz, num_kv_heads, head_dim)
+    indptr = torch.tensor(
+        [i * qkv_len for i in range(batch_size + 1)], dtype=torch.int32, device="cuda:0"
+    )
+    offsets = torch.full((batch_size,), offset, dtype=torch.int32, device="cuda:0")
+
+    # ref implementation
+    q_rope_ref, k_rope_ref = flashinfer.apply_rope(
+        q,
+        k,
+        indptr,
+        offsets,
+        rotary_dim=rotary_dim,
+        interleave=True,
+        rope_theta=1e4,
+    )
+
+    # persistent implementation
+    if not use_graph:
+        flashinfer.apply_rope_persistent_in_place(
+            q,
+            k,
+            indptr,
+            offsets,
+            torch.tensor([batch_size], dtype=torch.int32, device="cuda:0"),
+            rotary_dim=rotary_dim,
+            interleave=True,
+            rope_theta=1e4,
+        )
+    else:
+        # first fake dummy data to capture graph
+        dummy_batch_size = 512
+        dummy_qkv_len = 1024
+        dummy_nnz = dummy_batch_size * dummy_qkv_len
+        dummy_indptr = torch.tensor(
+            [i * dummy_qkv_len for i in range(dummy_batch_size + 1)],
+            dtype=torch.int32,
+            device="cuda:0",
+        )
+        dummy_offsets = torch.full(
+            (dummy_batch_size,), offset, dtype=torch.int32, device="cuda:0"
+        )
+
+        # create buf
+        max_nnz = 2048 * 512
+        max_batch_size = 2048
+        q_buf = torch.empty(
+            max_nnz, num_qo_heads, head_dim, dtype=torch.float16, device="cuda:0"
+        )
+        k_buf = torch.empty(
+            max_nnz, num_kv_heads, head_dim, dtype=torch.float16, device="cuda:0"
+        )
+        indptr_buf = torch.empty(max_batch_size + 1, dtype=torch.int32, device="cuda:0")
+        offsets_buf = torch.empty(max_batch_size, dtype=torch.int32, device="cuda:0")
+        batch_size_buf = torch.tensor(
+            [max_batch_size], dtype=torch.int32, device="cuda:0"
+        )
+
+        if dummy_nnz >= max_nnz or dummy_batch_size >= max_batch_size:
+            pytest.skip("max_nnz or max_batch_size is too small")
+        if nnz >= max_nnz or batch_size >= max_batch_size:
+            pytest.skip("nnz or batch_size is too large")
+
+        # graph capture
+        indptr_buf[: dummy_indptr.size(0)].copy_(dummy_indptr)
+        offsets_buf[: dummy_offsets.size(0)].copy_(dummy_offsets)
+        batch_size_buf[0] = dummy_batch_size
+
+        g = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(g):
+            flashinfer.apply_rope_persistent_in_place(
+                q_buf[:dummy_nnz],
+                k_buf[:dummy_nnz],
+                indptr_buf[: dummy_indptr.size(0)],
+                offsets_buf[: dummy_offsets.size(0)],
+                batch_size_buf,
+                rotary_dim=rotary_dim,
+                interleave=True,
+                rope_theta=1e4,
+            )
+
+        # replay
+        q_buf[:nnz].copy_(q.contiguous())
+        k_buf[:nnz].copy_(k.contiguous())
+        indptr_buf[: batch_size + 1].copy_(indptr)
+        offsets_buf[:batch_size].copy_(offsets)
+        batch_size_buf[0] = batch_size
+        g.replay()
+
+        # slice output
+        q = q_buf[:nnz].contiguous()
+        k = k_buf[:nnz].contiguous()
+
+    # compare
+    torch.testing.assert_close(q, q_rope_ref, rtol=1e-3, atol=1e-3)
+    torch.testing.assert_close(k, k_rope_ref, rtol=1e-3, atol=1e-3)
+
+
 if __name__ == "__main__":
-    # test_rope(2, 1, 8, 8, 1, 128, "llama", 1.0, False)
-    # test_rope_pos_ids(2, 1, 8, 8, 1, 128, "llama31", 1.0, False)
-    # test_rope_cos_sin_cache(
-    #     64, 64, 32, 8000, True, torch.bfloat16, "cuda", 32, 32, 1, 1
-    # )
     test_mla_rope_quantize(1, 1, torch.float16, torch.float8_e4m3fn)

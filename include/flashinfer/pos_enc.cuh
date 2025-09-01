@@ -688,6 +688,93 @@ __global__ void BatchQKApplyRotaryKernel(
   }
 }
 
+template <bool interleave, uint32_t head_dim, uint32_t vec_size, uint32_t bdx, typename DType,
+          typename IdType>
+__global__ void BatchQKApplyRotaryPersistentKernel(
+    DType* q, DType* k, DType* q_rope, DType* k_rope, IdType* __restrict__ indptr,
+    IdType* __restrict__ offsets, IdType* __restrict__ batch_size_ptr, uint32_t num_qo_heads,
+    uint32_t num_kv_heads, uint32_t rotary_dim, size_t q_stride_n, size_t q_stride_h,
+    size_t k_stride_n, size_t k_stride_h, size_t q_rope_stride_n, size_t q_rope_stride_h,
+    size_t k_rope_stride_n, size_t k_rope_stride_h, float smooth_a, float smooth_b,
+    float rope_rcp_scale, float rope_rcp_theta) {
+  const uint32_t tx = threadIdx.x, ty = threadIdx.y;
+  const uint32_t bdy = blockDim.y;
+  vec_t<float, vec_size> freq;
+  if (tx * vec_size < rotary_dim) {
+#pragma unroll
+    for (uint32_t i = 0; i < vec_size; ++i) {
+      if constexpr (interleave) {
+        freq[i] = __powf(rope_rcp_theta, float(2 * ((tx * vec_size + i) / 2)) / float(rotary_dim));
+      } else {
+        freq[i] = __powf(rope_rcp_theta,
+                         float(2 * ((tx * vec_size + i) % (rotary_dim / 2))) / float(rotary_dim));
+      }
+
+      float smooth = freq[i] * smooth_a + smooth_b;
+      smooth = max(0.0f, min(1.0f, smooth));  // clamp to [0, 1]
+      freq[i] = (1 - smooth) * (freq[i] * rope_rcp_scale) + smooth * freq[i];
+    }
+  }
+
+  // unroll on batch dimension
+  const uint32_t worker_id = blockIdx.x, num_workers = gridDim.x;
+  const auto batch_size = *batch_size_ptr;
+  for (uint32_t bx = worker_id; bx < batch_size * (num_qo_heads + num_kv_heads);
+       bx += num_workers) {
+    if (bx < batch_size * num_qo_heads) {
+      // apply rotary to q
+      const uint32_t batch_idx = bx / num_qo_heads;
+      const uint32_t qo_head_idx = bx % num_qo_heads;
+      const uint32_t seq_len = indptr[batch_idx + 1] - indptr[batch_idx];
+      const uint32_t offset = offsets[batch_idx];
+#pragma unroll 2
+      for (uint32_t i = 0; i < (seq_len + bdy - 1) / bdy; ++i) {
+        vec_t<float, vec_size> q_vec;
+        if (i * bdy + ty < seq_len) {
+          DType* q_ptr = q + get_elem_offset_impl(indptr[batch_idx] + i * bdy + ty, qo_head_idx, 0,
+                                                  q_stride_n, q_stride_h);
+          DType* q_rope_ptr =
+              q_rope + get_elem_offset_impl(indptr[batch_idx] + i * bdy + ty, qo_head_idx, 0,
+                                            q_rope_stride_n, q_rope_stride_h);
+          if constexpr (interleave) {
+            q_vec = vec_apply_llama_rope_interleave<vec_size, bdx>(
+                q_ptr, freq, offset + i * bdy + ty, rotary_dim);
+          } else {
+            q_vec =
+                vec_apply_llama_rope<vec_size, bdx>(q_ptr, freq, offset + i * bdy + ty, rotary_dim);
+          }
+          q_vec.cast_store(q_rope_ptr + tx * vec_size);
+        }
+      }
+    } else {
+      // apply rotary to k
+      uint32_t batch_idx = (bx - batch_size * num_qo_heads) / num_kv_heads;
+      uint32_t kv_head_idx = (bx - batch_size * num_qo_heads) % num_kv_heads;
+      const uint32_t seq_len = indptr[batch_idx + 1] - indptr[batch_idx];
+      const uint32_t offset = offsets[batch_idx];
+#pragma unroll 2
+      for (uint32_t i = 0; i < (seq_len + bdy - 1) / bdy; ++i) {
+        vec_t<float, vec_size> k_vec;
+        if (i * bdy + ty < seq_len) {
+          DType* k_ptr = k + get_elem_offset_impl(indptr[batch_idx] + i * bdy + ty, kv_head_idx, 0,
+                                                  k_stride_n, k_stride_h);
+          DType* k_rope_ptr =
+              k_rope + get_elem_offset_impl(indptr[batch_idx] + i * bdy + ty, kv_head_idx, 0,
+                                            k_rope_stride_n, k_rope_stride_h);
+          if constexpr (interleave) {
+            k_vec = vec_apply_llama_rope_interleave<vec_size, bdx>(
+                k_ptr, freq, offset + i * bdy + ty, rotary_dim);
+          } else {
+            k_vec =
+                vec_apply_llama_rope<vec_size, bdx>(k_ptr, freq, offset + i * bdy + ty, rotary_dim);
+          }
+          k_vec.cast_store(k_rope_ptr + tx * vec_size);
+        }
+      }
+    }
+  }
+}
+
 #define DISPATCH_INTERLEAVE(interleave, INTERLEAVE, ...) \
   if (interleave) {                                      \
     const bool INTERLEAVE = true;                        \
@@ -926,6 +1013,68 @@ cudaError_t BatchQKApplyRotary(DType* q, DType* k, DType* q_rope, DType* k_rope,
                       (void*)&indptr,
                       (void*)&offsets,
                       (void*)&batch_size,
+                      (void*)&num_qo_heads,
+                      (void*)&num_kv_heads,
+                      (void*)&rotary_dim,
+                      (void*)&q_stride_n,
+                      (void*)&q_stride_h,
+                      (void*)&k_stride_n,
+                      (void*)&k_stride_h,
+                      (void*)&q_rope_stride_n,
+                      (void*)&q_rope_stride_h,
+                      (void*)&k_rope_stride_n,
+                      (void*)&k_rope_stride_h,
+                      (void*)&smooth_a,
+                      (void*)&smooth_b,
+                      (void*)&rope_rcp_scale,
+                      (void*)&rope_rcp_theta};
+      FLASHINFER_CUDA_CALL(cudaLaunchKernel((void*)kernel, nblks, nthrs, args, 0, stream));
+    });
+  });
+
+  return cudaSuccess;
+}
+
+template <typename DType, typename IdType>
+cudaError_t BatchQKApplyRotaryPersistent(
+    DType* q, DType* k, DType* q_rope, DType* k_rope, IdType* __restrict__ indptr,
+    IdType* __restrict__ offsets, IdType* __restrict__ batch_size_ptr, uint32_t num_qo_heads,
+    uint32_t num_kv_heads, uint32_t rotary_dim, uint32_t head_dim, size_t q_stride_n,
+    size_t q_stride_h, size_t k_stride_n, size_t k_stride_h, size_t q_rope_stride_n,
+    size_t q_rope_stride_h, size_t k_rope_stride_n, size_t k_rope_stride_h, bool interleave,
+    float rope_scale, float rope_theta, cudaStream_t stream = nullptr) {
+  float rope_rcp_scale = 1.0f / rope_scale;
+  float rope_rcp_theta = 1.0f / rope_theta;
+  float smooth_a = 0.f;
+  float smooth_b = 0.f;
+
+  int dev_id = 0;
+  int num_sms = 0;
+  int num_blocks_per_sm = 0;
+  FLASHINFER_CUDA_CALL(cudaGetDevice(&dev_id));
+  FLASHINFER_CUDA_CALL(cudaDeviceGetAttribute(&num_sms, cudaDevAttrMultiProcessorCount, dev_id));
+
+  DISPATCH_INTERLEAVE(interleave, INTERLEAVE, {
+    DISPATCH_HEAD_DIM(head_dim, HEAD_DIM, {
+      constexpr uint32_t vec_size = std::max(16 / sizeof(DType), HEAD_DIM / 32);
+      constexpr uint32_t bdx = HEAD_DIM / vec_size;
+      uint32_t num_threads = std::max(128U, bdx);
+      uint32_t bdy = num_threads / bdx;
+      uint32_t smem_size = 0;
+      auto kernel =
+          BatchQKApplyRotaryPersistentKernel<INTERLEAVE, HEAD_DIM, vec_size, bdx, DType, IdType>;
+
+      FLASHINFER_CUDA_CALL(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&num_blocks_per_sm, kernel,
+                                                                         num_threads, smem_size));
+      dim3 nblks(num_sms * num_blocks_per_sm);
+      dim3 nthrs(bdx, bdy);
+      void* args[] = {(void*)&q,
+                      (void*)&k,
+                      (void*)&q_rope,
+                      (void*)&k_rope,
+                      (void*)&indptr,
+                      (void*)&offsets,
+                      (void*)&batch_size_ptr,
                       (void*)&num_qo_heads,
                       (void*)&num_kv_heads,
                       (void*)&rotary_dim,

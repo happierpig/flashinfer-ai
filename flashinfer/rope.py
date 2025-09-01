@@ -67,6 +67,37 @@ def _apply_rope(
     )
 
 
+@register_custom_op(
+    "flashinfer::apply_rope_persistent", mutates_args=("q_rope", "k_rope")
+)
+def _apply_rope_persistent(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    q_rope: torch.Tensor,
+    k_rope: torch.Tensor,
+    indptr: torch.Tensor,
+    offsets: torch.Tensor,
+    batch_size: torch.Tensor,
+    rotary_dim: int,
+    interleave: bool,
+    rope_scale: float,
+    rope_theta: float,
+) -> None:
+    get_rope_module().apply_rope_persistent(
+        q,
+        k,
+        q_rope,
+        k_rope,
+        indptr,
+        offsets,
+        batch_size,
+        rotary_dim,
+        interleave,
+        rope_scale,
+        rope_theta,
+    )
+
+
 @register_fake_op("flashinfer::apply_rope")
 def _fake_apply_rope(
     q: torch.Tensor,
@@ -757,6 +788,34 @@ def apply_rope(
         rope_theta,
     )
     return q_rope, k_rope
+
+
+def apply_rope_persistent_in_place(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    indptr: torch.Tensor,
+    offsets: torch.Tensor,
+    batch_size: torch.Tensor,
+    rotary_dim: Optional[int] = None,
+    interleave: bool = False,
+    rope_scale: float = 1,
+    rope_theta: float = 1e4,
+) -> None:
+    if rotary_dim is None:
+        rotary_dim = q.size(-1)
+    _apply_rope_persistent(
+        q,
+        k,
+        q,
+        k,
+        indptr,
+        offsets,
+        batch_size,
+        rotary_dim,
+        interleave,
+        rope_scale,
+        rope_theta,
+    )
 
 
 def apply_rope_pos_ids(

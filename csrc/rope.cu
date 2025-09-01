@@ -68,6 +68,58 @@ void apply_rope(at::Tensor q, at::Tensor k, at::Tensor q_rope, at::Tensor k_rope
   });
 }
 
+void apply_rope_persistent(at::Tensor q, at::Tensor k, at::Tensor q_rope, at::Tensor k_rope,
+                           at::Tensor indptr, at::Tensor offsets, at::Tensor batch_size,
+                           int64_t rotary_dim, bool interleave, double rope_scale,
+                           double rope_theta) {
+  CHECK_LAST_DIM_CONTIGUOUS(q);
+  CHECK_LAST_DIM_CONTIGUOUS(k);
+  CHECK_INPUT(indptr);
+  CHECK_INPUT(offsets);
+
+  auto device = q.device();
+  CHECK_EQ(k.device(), device);
+  CHECK_DIM(3, q);        // q: (nnz, H_Q, D)
+  CHECK_DIM(3, k);        // k: (nnz, H_K, D)
+  CHECK_DIM(1, indptr);   // indptr: (B + 1)
+  CHECK_DIM(1, offsets);  // offsets: (B)
+  CHECK_DIM(1, batch_size);
+  CHECK_EQ(batch_size.size(0), 1);
+  CHECK_EQ(q.size(0), k.size(0));
+  CHECK_EQ(q.size(2), k.size(2));
+  unsigned int num_qo_heads = q.size(1);
+  unsigned int num_kv_heads = k.size(1);
+  unsigned int head_dim = q.size(2);
+  CHECK_EQ(indptr.size(0), offsets.size(0) + 1);
+  size_t q_stride_n = q.stride(0);
+  size_t q_stride_h = q.stride(1);
+  size_t k_stride_n = k.stride(0);
+  size_t k_stride_h = k.stride(1);
+  size_t q_rope_stride_n = q_rope.stride(0);
+  size_t q_rope_stride_h = q_rope.stride(1);
+  size_t k_rope_stride_n = k_rope.stride(0);
+  size_t k_rope_stride_h = k_rope.stride(1);
+  CHECK_EQ(indptr.scalar_type(), offsets.scalar_type());
+
+  const c10::cuda::OptionalCUDAGuard device_guard(q.device());
+  auto stream = at::cuda::getCurrentCUDAStream();
+  DISPATCH_PYTORCH_DTYPE_TO_CTYPE_FP16(q.scalar_type(), c_type, [&] {
+    return DISPATCH_PYTORCH_IDTYPE_TO_CTYPE(indptr.scalar_type(), c_idtype, [&] {
+      cudaError_t status = BatchQKApplyRotaryPersistent(
+          static_cast<c_type*>(q.data_ptr()), static_cast<c_type*>(k.data_ptr()),
+          static_cast<c_type*>(q_rope.data_ptr()), static_cast<c_type*>(k_rope.data_ptr()),
+          static_cast<c_idtype*>(indptr.data_ptr()), static_cast<c_idtype*>(offsets.data_ptr()),
+          static_cast<c_idtype*>(batch_size.data_ptr()), num_qo_heads, num_kv_heads, rotary_dim,
+          head_dim, q_stride_n, q_stride_h, k_stride_n, k_stride_h, q_rope_stride_n,
+          q_rope_stride_h, k_rope_stride_n, k_rope_stride_h, interleave, rope_scale, rope_theta,
+          stream);
+      TORCH_CHECK(status == cudaSuccess, "BatchQKApplyRotaryPersistent failed with error code " +
+                                             std::string(cudaGetErrorString(status)));
+      return true;
+    });
+  });
+}
+
 void apply_rope_pos_ids(at::Tensor q, at::Tensor k, at::Tensor q_rope, at::Tensor k_rope,
                         at::Tensor pos_ids, int64_t rotary_dim, bool interleave, double rope_scale,
                         double rope_theta) {

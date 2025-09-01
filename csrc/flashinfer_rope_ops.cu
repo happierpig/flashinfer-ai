@@ -21,6 +21,11 @@ void apply_rope(at::Tensor q, at::Tensor k, at::Tensor q_rope, at::Tensor k_rope
                 at::Tensor offsets, int64_t rotary_dim, bool interleave, double rope_scale,
                 double rope_theta);
 
+void apply_rope_persistent(at::Tensor q, at::Tensor k, at::Tensor q_rope, at::Tensor k_rope,
+                           at::Tensor indptr, at::Tensor offsets, at::Tensor batch_size,
+                           int64_t rotary_dim, bool interleave, double rope_scale,
+                           double rope_theta);
+
 void apply_llama31_rope(at::Tensor q, at::Tensor k, at::Tensor q_rope, at::Tensor k_rope,
                         at::Tensor indptr, at::Tensor offsets, int64_t rotary_dim, bool interleave,
                         double rope_scale, double rope_theta, double low_freq_factor,
@@ -48,6 +53,8 @@ void mla_rope_quantize(at::Tensor q_rope_in, at::Tensor k_rope_in, at::Tensor q_
 TORCH_LIBRARY_FRAGMENT(TORCH_EXTENSION_NAME, m) {
   // "Apply RoPE"
   m.def("apply_rope", apply_rope);
+  // "Apply RoPE persistent version"
+  m.def("apply_rope_persistent", apply_rope_persistent);
   // "Apply Llama 3.1 style RoPE"
   m.def("apply_llama31_rope", apply_llama31_rope);
   // "Apply RoPE with positional ids"
