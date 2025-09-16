@@ -518,6 +518,8 @@ struct BlockBatchReductionPersistent {
     // v_merged: [qo_len, num_kv_heads, gqa_group_size, head_dim]
 #pragma unroll 1
     for (uint32_t i = worker_id; i < num_packed_qo_len * num_kv_heads; i += num_workers) {
+      __syncwarp();  // guarantee memory ordering
+
       PROFILER_EVENT_START(profiler_closure, PersistentProfileEventType::kReduction);
 
       // remap workload

@@ -184,8 +184,13 @@ def _run_attention(
     )
 
     torch.cuda.synchronize()
-    torch.testing.assert_close(out_old, out_new, rtol=1e-2, atol=1e-2)
-    torch.testing.assert_close(lse_old, lse_new, rtol=1e-2, atol=1e-2)
+
+    if test_dtype == torch.float16:
+        torch.testing.assert_close(out_old, out_new, rtol=1e-3, atol=1e-3)
+        torch.testing.assert_close(lse_old, lse_new, rtol=1e-3, atol=1e-3)
+    else:
+        torch.testing.assert_close(out_old, out_new, rtol=1e-2, atol=1e-2)
+        torch.testing.assert_close(lse_old, lse_new, rtol=1e-2, atol=1e-2)
 
 
 # -------------------------  PyTest test case  ----------------------------- #
