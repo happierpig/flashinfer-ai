@@ -1013,6 +1013,7 @@ struct HolisticPlanInfo {
     int64_t kv_end_offset;
     int64_t kv_head_idx_offset;
     int64_t work_indptr_offset;
+    int64_t batch_idx_offset;
   } tasks[NUM_TASKS];
   int64_t len_kv_chunk_offset;
   int64_t partial_o_offset;
@@ -1021,7 +1022,7 @@ struct HolisticPlanInfo {
   int64_t merge_o_indices_offset;
   int64_t num_qo_len_offset;
 
-  static constexpr uint32_t NUM_TASK_ARGS = 10;
+  static constexpr uint32_t NUM_TASK_ARGS = 11;
   static constexpr uint32_t NUM_SHARED_ARGS = 8;
 
   std::vector<int64_t> ToVector() const {
@@ -1039,6 +1040,7 @@ struct HolisticPlanInfo {
       vec.push_back(tasks[i].kv_end_offset);
       vec.push_back(tasks[i].kv_head_idx_offset);
       vec.push_back(tasks[i].work_indptr_offset);
+      vec.push_back(tasks[i].batch_idx_offset);
     }
     vec.push_back(len_kv_chunk_offset);
     vec.push_back(partial_o_offset);
@@ -1069,6 +1071,7 @@ struct HolisticPlanInfo {
       tasks[i].kv_end_offset = vec[2 + i * NUM_TASK_ARGS + 7];
       tasks[i].kv_head_idx_offset = vec[2 + i * NUM_TASK_ARGS + 8];
       tasks[i].work_indptr_offset = vec[2 + i * NUM_TASK_ARGS + 9];
+      tasks[i].batch_idx_offset = vec[2 + i * NUM_TASK_ARGS + 10];
     }
     len_kv_chunk_offset = vec[2 + NUM_TASKS * NUM_TASK_ARGS];
     partial_o_offset = vec[3 + NUM_TASKS * NUM_TASK_ARGS];
@@ -1189,7 +1192,8 @@ inline cudaError_t TwoStageHolisticPlan(void* float_buffer, size_t float_workspa
         cluster_kv_start(num_clusters, std::vector<IdType>()),
         cluster_kv_end(num_clusters, std::vector<IdType>()),
         cluster_kv_head_idx(num_clusters, std::vector<IdType>()),
-        cluster_partial_indptr(num_clusters, std::vector<IdType>());
+        cluster_partial_indptr(num_clusters, std::vector<IdType>()),
+        cluster_batch_idx(num_clusters, std::vector<IdType>());
 
     for (auto& [i, qo_len, kv_len] : idx_qo_kv_len_vec[task]) {
       int packed_qo_len = qo_len * gqa_group_size;
@@ -1223,6 +1227,9 @@ inline cudaError_t TwoStageHolisticPlan(void* float_buffer, size_t float_workspa
             cluster_kv_start[cluster_idx].push_back(kv_start);
             cluster_kv_end[cluster_idx].push_back(kv_start + actual_len);
             cluster_kv_head_idx[cluster_idx].push_back(kv_head_idx);
+
+            // keep track of batch idx for jit parameters
+            cluster_batch_idx[cluster_idx].push_back(i);
           }
           remaining_len -= actual_len;
           zero_kv_len = (remaining_len == 0);
@@ -1266,6 +1273,7 @@ inline cudaError_t TwoStageHolisticPlan(void* float_buffer, size_t float_workspa
     auto kv_start_vec = flatten(cluster_kv_start, total_num_works);
     auto kv_end_vec = flatten(cluster_kv_end, total_num_works);
     auto kv_head_idx_vec = flatten(cluster_kv_head_idx, total_num_works);
+    auto batch_idx_vec = flatten(cluster_batch_idx, total_num_works);
 
     plan_info.tasks[task].q_indptr_offset =
         int_allocator.aligned_alloc_offset(sizeof(IdType) * max_total_num_works, 16, "q_indptr");
@@ -1287,6 +1295,8 @@ inline cudaError_t TwoStageHolisticPlan(void* float_buffer, size_t float_workspa
         int_allocator.aligned_alloc_offset(sizeof(IdType) * max_total_num_works, 16, "kv_head_idx");
     plan_info.tasks[task].work_indptr_offset =
         int_allocator.aligned_alloc_offset(sizeof(IdType) * max_total_num_works, 16, "work_indptr");
+    plan_info.tasks[task].batch_idx_offset =
+        int_allocator.aligned_alloc_offset(sizeof(IdType) * max_total_num_works, 16, "batch_idx");
 
     CopyToPageLockedBuffer(page_locked_int_buffer, plan_info.tasks[task].q_indptr_offset,
                            q_indptr_vec);
@@ -1305,6 +1315,8 @@ inline cudaError_t TwoStageHolisticPlan(void* float_buffer, size_t float_workspa
                            kv_head_idx_vec);
     CopyToPageLockedBuffer(page_locked_int_buffer, plan_info.tasks[task].work_indptr_offset,
                            work_indptr_vec);
+    CopyToPageLockedBuffer(page_locked_int_buffer, plan_info.tasks[task].batch_idx_offset,
+                           batch_idx_vec);
   }
   plan_info.len_kv_chunk_offset =
       int_allocator.aligned_alloc_offset(sizeof(IdType) * NUM_TASKS, 16, "len_kv_chunk");

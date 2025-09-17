@@ -16,11 +16,12 @@ limitations under the License.
 
 import functools
 import math
-from typing import Optional, Tuple, Union
+from typing import Optional, Tuple, Union, List, Dict, Any
 
 import torch
 
-from .jit import gen_batch_attention_module
+from .jit import gen_batch_attention_module, gen_customize_batch_attention_module
+from .prefill import make_hashable_cache
 from .utils import (
     MaskMode,
     PosEncodingMode,
@@ -35,11 +36,52 @@ def get_holistic_attention_module(*args):
     return gen_batch_attention_module(*args).build_and_load()
 
 
+@make_hashable_cache
+def get_customize_batch_attention_module(
+    uri: str,
+    dtype_q: torch.dtype,
+    dtype_kv: torch.dtype,
+    dtype_o: torch.dtype,
+    idtype: torch.dtype,
+    head_dim_qk: int,
+    head_dim_vo: int,
+    additional_tensor_names: List[str],
+    additional_tensor_dtypes: List[str],
+    additional_scalar_names: List[str],
+    additional_scalar_dtypes: List[str],
+    variant_name: str,
+    variant_decl: str,
+    pos_encoding_mode: int = 0,
+    use_logits_soft_cap: bool = False,
+    use_profiler: bool = False,
+):
+    return gen_customize_batch_attention_module(
+        uri,
+        dtype_q,
+        dtype_kv,
+        dtype_o,
+        idtype,
+        head_dim_qk,
+        head_dim_vo,
+        additional_tensor_names,
+        additional_tensor_dtypes,
+        additional_scalar_names,
+        additional_scalar_dtypes,
+        variant_name,
+        variant_decl,
+        pos_encoding_mode,
+        use_logits_soft_cap,
+        use_profiler,
+    ).build_and_load()
+
+
 class BatchAttention:
     def __init__(
         self,
         kv_layout: str = "NHD",
         device: str = "cuda",
+        jit_args: Optional[List[Any]] = None,
+        jit_kwargs: Optional[Dict[str, Any]] = None,
     ):
         _check_kv_layout(kv_layout)
         self._kv_layout = kv_layout
@@ -61,11 +103,21 @@ class BatchAttention:
             pin_memory=True,
         )
 
+        # construct jit module if provided
+        if jit_args is not None:
+            if jit_kwargs is None:
+                jit_kwargs = {}
+            self._jit_module = get_customize_batch_attention_module(
+                *jit_args,
+                **jit_kwargs,
+            )
+        else:
+            self._jit_module = None
+
     def plan(
         self,
         qo_indptr: torch.Tensor,
         kv_indptr: torch.Tensor,
-        kv_indices: torch.Tensor,
         kv_len_arr: torch.Tensor,
         num_qo_heads: int,
         num_kv_heads: int,
@@ -83,19 +135,22 @@ class BatchAttention:
             logits_soft_cap = 0.0
         self._logits_soft_cap = logits_soft_cap
 
-        # get jit module
-        get_module_args = (
-            q_data_type,
-            kv_data_type,
-            q_data_type,
-            kv_indptr.dtype,
-            head_dim_qk,
-            head_dim_vo,
-            PosEncodingMode["NONE"].value,
-            logits_soft_cap > 0.0,
-            use_profiler,  # different compiler path
-        )
-        self.module = get_holistic_attention_module(*get_module_args)
+        # get cached module
+        if self._jit_module is not None:
+            self._cached_module = self._jit_module
+        else:
+            get_module_args = (
+                q_data_type,
+                kv_data_type,
+                q_data_type,
+                kv_indptr.dtype,
+                head_dim_qk,
+                head_dim_vo,
+                PosEncodingMode["NONE"].value,
+                logits_soft_cap > 0.0,
+                use_profiler,  # different compiler path
+            )
+            self._cached_module = get_holistic_attention_module(*get_module_args)
 
         qo_indptr_host = qo_indptr.to(torch.device("cpu"), non_blocking=True)
         kv_indptr_host = kv_indptr.to(torch.device("cpu"), non_blocking=True)
@@ -103,8 +158,6 @@ class BatchAttention:
         torch.cuda.synchronize()
 
         batch_size = kv_len_arr.shape[0]
-        self._page_size = page_size
-        self._sm_scale = sm_scale
         self._mask_mode = MaskMode.CAUSAL.value if causal else MaskMode.NON_CAUSAL.value
         self._num_qo_heads = num_qo_heads
         self._num_kv_heads = num_kv_heads
@@ -112,10 +165,7 @@ class BatchAttention:
         self._sm_scale = sm_scale
         self._use_profiler = use_profiler
 
-        # No addtional buf allocated for CUDA graph tensor
-        # Allocate outside FlashInfer
-        self._kv_indices = kv_indices
-        self._plan_info = self.module.plan(
+        self._plan_info = self._cached_module.plan(
             self.float_workspace_buffer,
             self.int_workspace_buffer,
             self.page_locked_int_workspace_buffer,
@@ -133,9 +183,10 @@ class BatchAttention:
         self,
         q: torch.Tensor,
         kv_cache: Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]],
+        kv_indices: torch.Tensor,
         out: Optional[torch.Tensor] = None,
         lse: Optional[torch.Tensor] = None,
-        logits_soft_cap: float = 0.0,
+        *args,
         profiler_buffer: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         if profiler_buffer is None:
@@ -143,10 +194,6 @@ class BatchAttention:
                 raise ValueError(
                     "Profiler is enabled, profiler_buffer must be provided"
                 )
-        if logits_soft_cap > 0.0 and self._logits_soft_cap <= 0.0:
-            raise ValueError(
-                "logits_soft_cap used in kernel run but not provided in plan(). This will cause template deduction error."
-            )
 
         k_cache, v_cache = _unpack_paged_kv_cache(kv_cache, self._kv_layout)
         if out is None:
@@ -156,21 +203,20 @@ class BatchAttention:
             lse = torch.empty(
                 q.shape[0], q.shape[1], device=q.device, dtype=torch.float32
             )
+
         head_dim_qk = q.shape[2]
         if self._sm_scale is None:
             self._sm_scale = 1.0 / math.sqrt(head_dim_qk)
 
-        # profiler_buffer is optional
-        profiler_args = (profiler_buffer,) if self._use_profiler else ()
-
-        self.module.run(
+        # prepare run args
+        run_args = [
             self.float_workspace_buffer,
             self.int_workspace_buffer,
             self._plan_info,
             q,
             k_cache,
             v_cache,
-            self._kv_indices,
+            kv_indices,
             out,
             lse,
             self._mask_mode,
@@ -178,11 +224,16 @@ class BatchAttention:
             self._num_qo_heads,
             self._num_kv_heads,
             self._page_size,
-            self._sm_scale,
-            logits_soft_cap,
-            # ADDITIONAL_FUNC_PARAMS
-            # PROFILER_FUNC_PARAMS
-            *profiler_args,
-        )
+        ]
+        if self._jit_module is not None:
+            run_args.extend(args)
+        else:
+            # corresponding to the ordering in `gen_batch_attention_module`
+            run_args.extend([self._logits_soft_cap, self._sm_scale])
 
+        # profiler_buffer is optional
+        profiler_args = (profiler_buffer,) if self._use_profiler else ()
+        run_args.extend(profiler_args)
+
+        self._cached_module.run(*run_args)
         return out, lse

@@ -166,7 +166,6 @@ def _run_attention(
     wrapper.plan(
         q_indptr,
         kv_indptr,
-        torch.arange(num_blocks, device=dev).int(),
         seq_lens,
         num_qo_heads,
         num_kv_heads,
@@ -178,11 +177,18 @@ def _run_attention(
         kv_data_type=test_dtype,
         logits_soft_cap=logits_soft_cap,
     )
-    out_new, lse_new = wrapper.run(q, kv_data, logits_soft_cap=logits_soft_cap)
+    out_new, lse_new = wrapper.run(
+        q, kv_data, torch.arange(num_blocks, device=dev).int()
+    )
 
     torch.cuda.synchronize()
-    torch.testing.assert_close(out_old, out_new, rtol=1e-2, atol=1e-2)
-    torch.testing.assert_close(lse_old, lse_new, rtol=1e-2, atol=1e-2)
+
+    if test_dtype == torch.float16:
+        torch.testing.assert_close(out_old, out_new, rtol=1e-3, atol=1e-3)
+        torch.testing.assert_close(lse_old, lse_new, rtol=1e-3, atol=1e-3)
+    else:
+        torch.testing.assert_close(out_old, out_new, rtol=1e-2, atol=1e-2)
+        torch.testing.assert_close(lse_old, lse_new, rtol=1e-2, atol=1e-2)
 
 
 # -------------------------  PyTest test case  ----------------------------- #

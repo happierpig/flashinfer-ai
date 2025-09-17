@@ -23,6 +23,7 @@ def generate_additional_params(
     additional_scalar_names: List[str],
     additional_scalar_dtypes: List[str],
     is_sm90_template: bool = False,
+    is_persistent_template: bool = False,
 ):
     additional_params_decl = "".join(
         [
@@ -67,15 +68,34 @@ def generate_additional_params(
             ]
         )
     else:
-        additional_params_setter = " \\\n".join(
-            [
-                (
-                    f"params.{var} = {var} ? static_cast<{dtype}*>({var}->data_ptr()): nullptr;"
-                    if var.startswith("maybe")
-                    else f"params.{var} = static_cast<{dtype}*>({var}.data_ptr());"
-                )
-                for dtype, var in zip(additional_tensor_dtypes, additional_tensor_names)
-            ]
-            + [f"params.{var} = {var};" for var in additional_scalar_names]
-        )
+        if not is_persistent_template:
+            additional_params_setter = " \\\n".join(
+                [
+                    (
+                        f"params.{var} = {var} ? static_cast<{dtype}*>({var}->data_ptr()): nullptr;"
+                        if var.startswith("maybe")
+                        else f"params.{var} = static_cast<{dtype}*>({var}.data_ptr());"
+                    )
+                    for dtype, var in zip(
+                        additional_tensor_dtypes, additional_tensor_names
+                    )
+                ]
+                + [f"params.{var} = {var};" for var in additional_scalar_names]
+            )
+        else:
+            # used in param dispatch
+            additional_params_setter = " \\\n".join(
+                [
+                    (
+                        f"params[i].{var} = {var} ? static_cast<{dtype}*>({var}->data_ptr()): nullptr;"
+                        if var.startswith("maybe")
+                        else f"params[i].{var} = static_cast<{dtype}*>({var}.data_ptr());"
+                    )
+                    for dtype, var in zip(
+                        additional_tensor_dtypes, additional_tensor_names
+                    )
+                ]
+                + [f"params[i].{var} = {var};" for var in additional_scalar_names]
+            )
+
     return (additional_params_decl, additional_func_params, additional_params_setter)

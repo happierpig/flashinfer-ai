@@ -22,6 +22,13 @@
 
 namespace flashinfer {
 
+#define REGISTER_INPUT_TRANSFORM(params, batch_idx, kv_head_idx, indices, ...)             \
+  template <typename Params, typename T>                                                   \
+  __device__ __forceinline__ void InputTransform(const Params& params, uint32_t batch_idx, \
+                                                 uint32_t kv_head_idx, T& indices) {       \
+    __VA_ARGS__                                                                            \
+  }
+
 #define REGISTER_QUERY_TRANSFORM(params, q, ...)                                    \
   template <typename Params, typename T>                                            \
   __device__ __forceinline__ T QueryTransform(const Params& params, void* q_smem) { \

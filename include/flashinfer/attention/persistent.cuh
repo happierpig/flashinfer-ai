@@ -31,11 +31,11 @@ using cp_async::SharedMemFillMode;
 
 template <typename Params>
 __device__ __forceinline__ auto get_block_coord(const Params& params, const uint32_t work_idx) {
-  return std::tuple(params.q_indptr[work_idx], params.kv_indptr[work_idx],
-                    params.partial_indptr[work_idx], params.q_len[work_idx],
-                    params.kv_len[work_idx], params.q_start[work_idx], params.kv_start[work_idx],
-                    params.kv_end[work_idx], params.kv_head_idx_arr[work_idx],
-                    *params.len_kv_chunk);
+  return std::tuple(params.batch_idx_arr[work_idx], params.q_indptr[work_idx],
+                    params.kv_indptr[work_idx], params.partial_indptr[work_idx],
+                    params.q_len[work_idx], params.kv_len[work_idx], params.q_start[work_idx],
+                    params.kv_start[work_idx], params.kv_end[work_idx],
+                    params.kv_head_idx_arr[work_idx], *params.len_kv_chunk);
 }
 
 template <typename KTraits>
@@ -228,8 +228,6 @@ struct BlockBatchPagedAttentionPersistent {
     const uint32_t cluster_tile_q = gridDim.x * CTA_TILE_Q;
     smem_t<SWIZZLE_MODE_Q> q_smem(smem_storage->q_smem);
 
-    AttentionVariant variant(params, /*batch_idx=*/0, nullptr);
-
     const uint32_t lane_idx = threadIdx.x % 32;
     const uint32_t warp_idx = threadIdx.x / 32;
 
@@ -263,8 +261,14 @@ struct BlockBatchPagedAttentionPersistent {
         PROFILER_EVENT_START(profiler_closure, PersistentProfileEventType::kRunner2);
       }
 
-      const auto [q_indptr, kv_indptr, o_indptr, q_len, kv_len, packed_qo_start, kv_start, kv_end,
-                  kv_head_idx, len_kv_chunk] = get_block_coord(params, work_idx);
+      const auto [batch_idx, q_indptr, kv_indptr, o_indptr, q_len, kv_len, packed_qo_start,
+                  kv_start, kv_end, kv_head_idx, len_kv_chunk] = get_block_coord(params, work_idx);
+
+      // initialize per-work variant for local metadata calculation
+      // pass work-idx to get qo-len / kv-len
+      AttentionVariant variant(params, work_idx, nullptr);
+      // redirect input indices
+      variant.InputTransform(params, batch_idx, kv_head_idx, kv_indices);
 
       const uint32_t kv_chunk_idx = kv_start / len_kv_chunk;
       const uint32_t num_kv_chunks = ceil_div(
@@ -329,13 +333,12 @@ struct BlockBatchPagedAttentionPersistent {
             __syncthreads();
 
             compute_qk<KTraits>(&q_smem, &q_smem_offset_r, &k_smem, &k_smem_offset_r, s_frag);
-            if constexpr (AttentionVariant::use_logits_soft_cap) {
-              logits_transform<KTraits>(
-                  params, variant, /*batch_idx=*/0, qo_packed_idx_base,
-                  kv_start + (kv_tile_idx * NUM_WARPS_KV + get_warp_idx_kv<KTraits>(tid.z)) *
-                                 NUM_MMA_KV * 16,
-                  q_len, kv_len, gqa_group_size, s_frag, tid, kv_head_idx);
-            }
+            logits_transform<KTraits>(
+                params, variant, /*batch_idx=*/0, qo_packed_idx_base,
+                kv_start + (kv_tile_idx * NUM_WARPS_KV + get_warp_idx_kv<KTraits>(tid.z)) *
+                               NUM_MMA_KV * 16,
+                q_len, kv_len, gqa_group_size, s_frag, tid, kv_head_idx);
+
             if constexpr (WITH_MASK) {
               logits_mask<KTraits>(
                   params, variant, /*batch_idx=*/0, qo_packed_idx_base,
@@ -367,13 +370,12 @@ struct BlockBatchPagedAttentionPersistent {
 #pragma unroll
       for (; kv_tile_idx >= 0; --kv_tile_idx) {
         compute_qk<KTraits>(&q_smem, &q_smem_offset_r, &k_smem, &k_smem_offset_r, s_frag);
-        if constexpr (AttentionVariant::use_logits_soft_cap) {
-          logits_transform<KTraits>(
-              params, variant, /*batch_idx=*/0, qo_packed_idx_base,
-              kv_start +
-                  (kv_tile_idx * NUM_WARPS_KV + get_warp_idx_kv<KTraits>(tid.z)) * NUM_MMA_KV * 16,
-              q_len, kv_len, gqa_group_size, s_frag, tid, kv_head_idx);
-        }
+        logits_transform<KTraits>(
+            params, variant, /*batch_idx=*/0, qo_packed_idx_base,
+            kv_start +
+                (kv_tile_idx * NUM_WARPS_KV + get_warp_idx_kv<KTraits>(tid.z)) * NUM_MMA_KV * 16,
+            q_len, kv_len, gqa_group_size, s_frag, tid, kv_head_idx);
+        // always apply mask
         logits_mask<KTraits>(
             params, variant, /*batch_idx=*/0, qo_packed_idx_base,
             kv_start +
@@ -514,6 +516,8 @@ struct BlockBatchReductionPersistent {
     // v_merged: [qo_len, num_kv_heads, gqa_group_size, head_dim]
 #pragma unroll 1
     for (uint32_t i = worker_id; i < num_packed_qo_len * num_kv_heads; i += num_workers) {
+      __syncwarp();  // guarantee memory ordering
+
       PROFILER_EVENT_START(profiler_closure, PersistentProfileEventType::kReduction);
 
       // remap workload

@@ -73,7 +73,6 @@ def run_bench(
     wrapper.plan(
         q_indptr.to(device),
         kv_indptr.to(device),
-        torch.arange(num_blocks, dtype=torch.int32, device=device),
         seq_lens.to(device),
         num_qo_heads,
         num_kv_heads,
@@ -84,7 +83,8 @@ def run_bench(
         q_data_type=torch.bfloat16,
         kv_data_type=torch.bfloat16,
     )
-    measurements_new = bench_gpu_time(lambda: wrapper.run(q, kv_data))
+    kv_indices = torch.arange(num_blocks, dtype=torch.int32, device=device)
+    measurements_new = bench_gpu_time(lambda: wrapper.run(q, kv_data, kv_indices))
     ms_new = np.mean(measurements_new)
 
     total_bytes = (

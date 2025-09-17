@@ -952,8 +952,12 @@ def gen_batch_attention_module(
 
     additional_tensor_names: List[str] = []
     additional_tensor_dtypes: List[str] = []
-    additional_scalar_names: List[str] = []
-    additional_scalar_dtypes: List[str] = []
+    additional_scalar_names: List[str] = [
+        "logits_soft_cap",
+        "sm_scale",
+    ]
+    additional_scalar_dtypes: List[str] = ["double", "double"]
+
     variant_name = f"StandardAttention<{str(use_logits_soft_cap).lower()}>"
     variant_decl = "#include<flashinfer/attention/variants.cuh>"
 
@@ -1622,6 +1626,8 @@ def gen_customize_batch_attention_module(
             additional_tensor_dtypes,
             additional_scalar_names,
             additional_scalar_dtypes,
+            is_sm90_template=False,
+            is_persistent_template=True,  # params dispatch
         )
     )
     with open(
