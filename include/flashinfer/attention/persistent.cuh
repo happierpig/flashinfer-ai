@@ -818,7 +818,6 @@ struct BlockBatchAttentionScorePersistent {
       load_q_global_smem<KTraits>(qo_packed_idx_base, qo_upperbound, q_ptr_base, q_stride_n,
                                   q_stride_h, gqa_group_size, &q_smem, tid);
 
-      smem_t<SWIZZLE_MODE_KV> k_smem(smem_storage->k_smem);
       int kv_tile_idx =
           ceil_div((CAUSAL ? min(kv_end,
                                  kv_len - q_len +
@@ -843,27 +842,47 @@ struct BlockBatchAttentionScorePersistent {
                                kv_indices, thr_local_kv_offset);
       page_produce_kv<false, KTraits>(smem_storage, &k_smem_offset_w, k,
                                       kv_start + kv_tile_idx * CTA_TILE_KV, thr_local_kv_offset,
-                                      kv_end, warp_idx, lane_idx);
+                                      kv_end, warp_idx, lane_idx, kv_tile_idx % NUM_STAGES);
       cp_async::commit_group();
+
+#pragma unroll
+      for (int stage_idx = 1; stage_idx < NUM_STAGES; ++stage_idx) {
+        if (kv_tile_idx - stage_idx >= 0) {
+          prefetch_offest<KTraits>(block_iter_base + (kv_tile_idx - stage_idx) * CTA_TILE_KV,
+                                   packed_kv_bound, kv_head_idx, k_stride_page, k_stride_h,
+                                   k_stride_n, block_size, kv_indices, thr_local_kv_offset);
+          page_produce_kv<false, KTraits>(smem_storage, &k_smem_offset_w, k,
+                                          kv_start + (kv_tile_idx - stage_idx) * CTA_TILE_KV,
+                                          thr_local_kv_offset, kv_end, warp_idx, lane_idx,
+                                          (kv_tile_idx - stage_idx) % NUM_STAGES);
+          cp_async::commit_group();
+        }
+      }
 
       // loop with mask
       // FIXME: potentially increase NUM_STAGES
       LOOP_SPLIT_MASK(
           kv_tile_idx, kv_tile_idx >= mask_tile_idx && kv_tile_idx > 0,
           kv_tile_idx + 1 > NUM_STAGES, {
-            prefetch_offest<KTraits>(block_iter_base + (kv_tile_idx - 1) * CTA_TILE_KV,
-                                     packed_kv_bound, kv_head_idx, k_stride_page, k_stride_h,
-                                     k_stride_n, block_size, kv_indices, thr_local_kv_offset);
-            cp_async::wait_group<0>();
+            cp_async::wait_group<NUM_STAGES - 1>();
             __syncthreads();
 
+            // compute logits
+            smem_t<SWIZZLE_MODE_KV> k_smem(smem_storage->k_smem[kv_tile_idx % NUM_STAGES]);
             compute_qk<KTraits>(&q_smem, &q_smem_offset_r, &k_smem, &k_smem_offset_r, s_frag);
-            __syncthreads();
 
-            page_produce_kv<false, KTraits>(smem_storage, &k_smem_offset_w, k,
-                                            kv_start + (kv_tile_idx - 1) * CTA_TILE_KV,
-                                            thr_local_kv_offset, kv_end, warp_idx, lane_idx);
-            cp_async::commit_group();
+            // try loading
+            if (kv_tile_idx - NUM_STAGES >= 0) {
+              __syncthreads();
+              prefetch_offest<KTraits>(block_iter_base + (kv_tile_idx - NUM_STAGES) * CTA_TILE_KV,
+                                       packed_kv_bound, kv_head_idx, k_stride_page, k_stride_h,
+                                       k_stride_n, block_size, kv_indices, thr_local_kv_offset);
+              page_produce_kv<false, KTraits>(smem_storage, &k_smem_offset_w, k,
+                                              kv_start + (kv_tile_idx - NUM_STAGES) * CTA_TILE_KV,
+                                              thr_local_kv_offset, kv_end, warp_idx, lane_idx,
+                                              (kv_tile_idx - NUM_STAGES) % NUM_STAGES);
+              cp_async::commit_group();
+            }
 
             // mask first to produce zero attention score for oob pos
             if constexpr (WITH_MASK) {
@@ -874,6 +893,7 @@ struct BlockBatchAttentionScorePersistent {
                   q_len, kv_len, kv_end, gqa_group_size, s_frag, tid, kv_head_idx);
             }
 
+            // compute scores, reduction, and dump
             logits_to_scores_and_reduction<KTraits>(
                 params, variant, /*batch_idx=*/0, qo_packed_idx_base,
                 kv_start + (kv_tile_idx * NUM_WARPS_KV + get_warp_idx_kv<KTraits>(tid.z)) *
@@ -885,6 +905,7 @@ struct BlockBatchAttentionScorePersistent {
       __syncthreads();
 #pragma unroll
       for (; kv_tile_idx >= 0; --kv_tile_idx) {
+        smem_t<SWIZZLE_MODE_KV> k_smem(smem_storage->k_smem[kv_tile_idx % NUM_STAGES]);
         compute_qk<KTraits>(&q_smem, &q_smem_offset_r, &k_smem, &k_smem_offset_r, s_frag);
         // always apply mask
         logits_mask<KTraits>(
@@ -975,16 +996,19 @@ cudaError_t BatchAttentionScorePersistent(const Params params_1, const Params pa
   constexpr uint32_t NUM_MMA_KV_1 = 4;
   constexpr uint32_t NUM_MMA_D_QK = HEAD_DIM_QK / 16;
   constexpr uint32_t NUM_MMA_D_VO = HEAD_DIM_VO / 16;
-  using KTraits1 = KernelTraits<MASK_MODE, CTA_TILE_Q_1, NUM_MMA_Q_1, NUM_MMA_KV_1, NUM_MMA_D_QK,
-                                NUM_MMA_D_VO, NUM_WARPS_Q_1, NUM_WARPS_KV_1, PosEncodingMode::kNone,
-                                DTypeQ, DTypeKV, DTypeO, float, IdType, AttentionVariant>;
+  constexpr uint32_t NUM_STAGES = 3;
+  using KTraits1 =
+      KernelTraits<MASK_MODE, CTA_TILE_Q_1, NUM_MMA_Q_1, NUM_MMA_KV_1, NUM_MMA_D_QK, NUM_MMA_D_VO,
+                   NUM_WARPS_Q_1, NUM_WARPS_KV_1, PosEncodingMode::kNone, DTypeQ, DTypeKV, DTypeO,
+                   float, IdType, AttentionVariant, NUM_STAGES>;
+
   constexpr uint32_t NUM_WARPS_Q_2 = get_num_warps_q(CTA_TILE_Q_2);
   constexpr uint32_t NUM_WARPS_KV_2 = get_num_warps_kv(CTA_TILE_Q_2);
   constexpr uint32_t NUM_MMA_Q_2 = get_num_mma_q(CTA_TILE_Q_2);
   constexpr uint32_t NUM_MMA_KV_2 = 2;
   using KTraits2 = KernelTraits<MASK_MODE, CTA_TILE_Q_2, NUM_MMA_Q_2, NUM_MMA_KV_2, NUM_MMA_D_QK,
                                 NUM_MMA_D_VO, NUM_WARPS_Q_2, NUM_WARPS_KV_2, PosEncodingMode::kNone,
-                                DTypeQ, DTypeKV, DTypeO, float, IdType, AttentionVariant>;
+                                DTypeQ, DTypeKV, DTypeO, float, IdType, AttentionVariant, 1>;
 
   // Attention state reduction kernel
   constexpr uint32_t NUM_THREADS =
@@ -992,10 +1016,20 @@ cudaError_t BatchAttentionScorePersistent(const Params params_1, const Params pa
   size_t smem_size =
       max(sizeof(typename KTraits1::SharedStorage), sizeof(typename KTraits2::SharedStorage));
 
+  // printf("smem_size: %zu\n", smem_size);
+
   // Launch persistent kernel
   auto kernel =
       PersistentAttentionScoreKernelTemplate<BlockBatchAttentionScorePersistent<KTraits1, Params>,
                                              BlockBatchAttentionScorePersistent<KTraits2, Params>>;
+
+  // get occupancy
+
+  int occupancy = 0;
+  FLASHINFER_CUDA_CALL(
+      cudaOccupancyMaxActiveBlocksPerMultiprocessor(&occupancy, kernel, NUM_THREADS, smem_size));
+  // printf("occupancy: %d\n", occupancy);
+
   FLASHINFER_CUDA_CALL(
       cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size));
   dim3 nblks(num_blks_x, num_blks_y);

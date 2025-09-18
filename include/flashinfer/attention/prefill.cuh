@@ -73,12 +73,14 @@ constexpr uint32_t get_num_mma_q(const uint32_t cta_tile_q) {
 }
 
 template <uint32_t NUM_WARPS_KV, uint32_t CTA_TILE_Q, uint32_t CTA_TILE_KV, uint32_t HEAD_DIM_QK,
-          uint32_t HEAD_DIM_VO, typename DTypeQ, typename DTypeKV, typename DTypeO>
+          uint32_t HEAD_DIM_VO, typename DTypeQ, typename DTypeKV, typename DTypeO,
+          uint32_t NUM_STAGES = 1>
 struct SharedStorageQKVO {
   union {
     struct {
       alignas(16) DTypeQ q_smem[CTA_TILE_Q * HEAD_DIM_QK];
-      alignas(16) DTypeKV k_smem[CTA_TILE_KV * HEAD_DIM_QK];
+      // NUM_STATGES currently only used by AttentionScorePersistent
+      alignas(16) DTypeKV k_smem[NUM_STAGES][CTA_TILE_KV * HEAD_DIM_QK];
       alignas(16) DTypeKV v_smem[CTA_TILE_KV * HEAD_DIM_VO];
     };
     struct {  // NOTE(Zihao): synchronize attention states across warps
@@ -96,9 +98,9 @@ template <MaskMode MASK_MODE_, uint32_t CTA_TILE_Q_, uint32_t NUM_MMA_Q_, uint32
           uint32_t NUM_MMA_D_QK_, uint32_t NUM_MMA_D_VO_, uint32_t NUM_WARPS_Q_,
           uint32_t NUM_WARPS_KV_, PosEncodingMode POS_ENCODING_MODE_, typename DTypeQ_,
           typename DTypeKV_, typename DTypeO_, typename DTypeQKAccum_, typename IdType_,
-          typename AttentionVariant_>
+          typename AttentionVariant_, uint32_t NUM_STAGES_ = 1>
 struct KernelTraits {
-  static constexpr uint32_t NUM_STAGES = 1;  // used for BatchAttention Template
+  static constexpr uint32_t NUM_STAGES = NUM_STAGES_;  // used for BatchAttention Template
   static constexpr MaskMode MASK_MODE = MASK_MODE_;
   static constexpr uint32_t NUM_MMA_Q = NUM_MMA_Q_;
   static constexpr uint32_t NUM_MMA_KV = NUM_MMA_KV_;
@@ -140,7 +142,7 @@ struct KernelTraits {
   }
 
   using SharedStorage = SharedStorageQKVO<NUM_WARPS_KV, CTA_TILE_Q, CTA_TILE_KV, HEAD_DIM_QK,
-                                          HEAD_DIM_VO, DTypeQ, DTypeKV, DTypeO>;
+                                          HEAD_DIM_VO, DTypeQ, DTypeKV, DTypeO, NUM_STAGES>;
 #ifdef FP16_QK_REDUCTION_SUPPORTED
   template <typename DT>
   static constexpr DT getNegInf() {
@@ -323,15 +325,14 @@ __device__ __forceinline__ void produce_kv(smem_t<KTraits::SWIZZLE_MODE_KV> smem
 }
 
 template <bool produce_v, typename KTraits>
-__device__ __forceinline__ void page_produce_kv(typename KTraits::SharedStorage* smem_storage,
-                                                uint32_t* smem_offset,
-                                                typename KTraits::DTypeKV* kv_ptr,
-                                                const uint32_t kv_idx_base,
-                                                const size_t* thr_local_kv_offset,
-                                                const uint32_t kv_len, const uint32_t warp_idx,
-                                                const uint32_t lane_idx) {
+__device__ __forceinline__ void page_produce_kv(
+    typename KTraits::SharedStorage* smem_storage, uint32_t* smem_offset,
+    typename KTraits::DTypeKV* kv_ptr, const uint32_t kv_idx_base,
+    const size_t* thr_local_kv_offset, const uint32_t kv_len, const uint32_t warp_idx,
+    const uint32_t lane_idx, const uint32_t stage_idx = 0) {
   // NOTE: for fp8, this function doesn't work for head_dim = 64 at the moment
-  smem_t<KTraits::SWIZZLE_MODE_KV> smem(produce_v ? smem_storage->v_smem : smem_storage->k_smem);
+  smem_t<KTraits::SWIZZLE_MODE_KV> smem(produce_v ? smem_storage->v_smem
+                                                  : smem_storage->k_smem[stage_idx]);
   using DType = typename KTraits::DTypeKV;
   using IdType = typename KTraits::IdType;
   constexpr SharedMemFillMode fill_mode =
