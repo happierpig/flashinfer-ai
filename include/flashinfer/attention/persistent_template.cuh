@@ -95,6 +95,38 @@ __global__ __launch_bounds__(
                             params_1.merge_o_indices, smem, profiler_closure);
 #endif
 }
+
+// two runner version wo reduction
+template <class BlockPersistentRunner1, class BlockPersistentRunner2>
+__global__ __launch_bounds__(
+    max_threads<BlockPersistentRunner1, BlockPersistentRunner2>::
+        value) void PersistentAttentionScoreKernelTemplate(const __grid_constant__
+                                                           typename BlockPersistentRunner1::Params
+                                                               params_1,
+                                                           const __grid_constant__
+                                                           typename BlockPersistentRunner2::Params
+                                                               params_2) {
+  extern __shared__ uint8_t smem[];
+
+#ifdef FLASHINFER_ENABLE_PROFILER
+  ProfilerClosure
+      profiler_closure;  // no volatile as this is scope.CTA, and only threadIdx == 0 is modifying
+  PROFILER_INIT(params_1, smem, profiler_closure, 0, 1, (threadIdx.x == 0));
+#endif
+
+  auto& smem_storage_1 =
+      reinterpret_cast<typename BlockPersistentRunner1::KTraits::SharedStorage&>(smem);
+  auto& smem_storage_2 =
+      reinterpret_cast<typename BlockPersistentRunner2::KTraits::SharedStorage&>(smem);
+
+#ifndef FLASHINFER_ENABLE_PROFILER
+  BlockPersistentRunner1::Run(params_1, &smem_storage_1);
+  BlockPersistentRunner2::Run(params_2, &smem_storage_2);
+#else
+  BlockPersistentRunner1::Run(params_1, &smem_storage_1, profiler_closure);
+  BlockPersistentRunner2::Run(params_2, &smem_storage_2, profiler_closure);
+#endif
+}
 }  // namespace flashinfer
 
 #endif  // FLASHINFER_ATTENTION_PERSISTENT_TEMPLATE_CUH

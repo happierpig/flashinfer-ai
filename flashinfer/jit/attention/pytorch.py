@@ -1682,6 +1682,101 @@ def gen_customize_batch_attention_module(
     )
 
 
+def gen_customize_batch_attention_score_module(
+    uri: str,
+    dtype_q: torch.dtype,
+    dtype_kv: torch.dtype,
+    dtype_o: torch.dtype,
+    idtype: torch.dtype,
+    head_dim_qk: int,
+    head_dim_vo: int,
+    additional_tensor_names: List[str],
+    additional_tensor_dtypes: List[str],
+    additional_scalar_names: List[str],
+    additional_scalar_dtypes: List[str],
+    variant_name: str,
+    variant_decl: str,
+    pos_encoding_mode: int = 0,
+    use_logits_soft_cap: bool = False,
+    use_profiler: bool = False,
+):
+    kwargs = {
+        "variant_decl": variant_decl,
+        "variant_name": variant_name,
+        "dtype_q": dtype_map[dtype_q],
+        "dtype_kv": dtype_map[dtype_kv],
+        "dtype_o": dtype_map[dtype_o],
+        "idtype": dtype_map[idtype],
+        "head_dim_qk": head_dim_qk,
+        "head_dim_vo": head_dim_vo,
+        "pos_encoding_mode": pos_encoding_mode_literal[pos_encoding_mode],
+        "use_logits_soft_cap": str(use_logits_soft_cap).lower(),
+    }
+    gen_directory = jit_env.FLASHINFER_GEN_SRC_DIR / uri
+    (additional_params_decl, additional_func_params, additional_params_setter) = (
+        generate_additional_params(
+            additional_tensor_names,
+            additional_tensor_dtypes,
+            additional_scalar_names,
+            additional_scalar_dtypes,
+            is_sm90_template=False,
+            is_persistent_template=True,  # params dispatch
+        )
+    )
+    with open(
+        jit_env.FLASHINFER_CSRC_DIR / "batch_attention_score_customize_config.jinja"
+    ) as f:
+        config_templ = jinja2.Template(f.read())
+
+    with open(
+        jit_env.FLASHINFER_CSRC_DIR / "batch_attention_score_paged_kernel_inst.jinja"
+    ) as f:
+        paged_kernel_inst_templ = jinja2.Template(f.read())
+
+    kwargs |= {
+        "additional_params_decl": additional_params_decl,
+        "additional_func_params": additional_func_params,
+        "additional_params_setter": additional_params_setter,
+    }
+
+    generated_inc_str = config_templ.render(
+        **kwargs,
+    )
+    os.makedirs(gen_directory, exist_ok=True)
+
+    source_paths = []
+    for mask_mode in [0, 1, 2, 3]:
+        dest_path = (
+            gen_directory / f"batch_attention_score_paged_kernel_mask_{mask_mode}.cu"
+        )
+        source_paths.append(dest_path)
+        source = paged_kernel_inst_templ.render(
+            mask_mode=mask_mode_literal[mask_mode],
+            **kwargs,
+        )
+        write_if_different(dest_path, source)
+
+    for filename in [
+        "batch_attention_score.cu",
+        "batch_attention_score_jit_pybind.cu",
+    ]:
+        src_path = jit_env.FLASHINFER_CSRC_DIR / filename
+        dest_path = gen_directory / filename
+        source_paths.append(dest_path)
+        with open(src_path, "r") as f:
+            source = f.read()
+        write_if_different(dest_path, source)
+
+    generated_config_path = gen_directory / "batch_attention_score_config.inc"
+    write_if_different(generated_config_path, generated_inc_str)
+
+    return gen_jit_spec(
+        uri,
+        source_paths,
+        extra_cuda_cflags=["-DFLASHINFER_ENABLE_PROFILER"] if use_profiler else [],
+    )
+
+
 def cudnn_fmha_gen_module():
     return gen_jit_spec(
         "fmha_cudnn_gen",
