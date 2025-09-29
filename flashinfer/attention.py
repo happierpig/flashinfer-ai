@@ -155,7 +155,7 @@ class BatchAttention:
         qo_indptr_host = qo_indptr.to(torch.device("cpu"), non_blocking=True)
         kv_indptr_host = kv_indptr.to(torch.device("cpu"), non_blocking=True)
         kv_len_arr_host = kv_len_arr.to(torch.device("cpu"), non_blocking=True)
-        torch.cuda.synchronize()
+        torch.cuda.current_stream().synchronize()
 
         batch_size = kv_len_arr.shape[0]
         self._mask_mode = MaskMode.CAUSAL.value if causal else MaskMode.NON_CAUSAL.value
