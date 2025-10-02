@@ -17,6 +17,9 @@
 
 void rmsnorm(at::Tensor& out, at::Tensor& input, at::Tensor& weight, double eps, bool enable_pdl);
 
+void qk_rmsnorm(at::Tensor& out, at::Tensor& input, at::Tensor& weight, double eps,
+                bool enable_pdl);
+
 void fused_add_rmsnorm(at::Tensor& input, at::Tensor& residual, at::Tensor& weight, double eps,
                        bool enable_pdl);
 
@@ -29,6 +32,8 @@ void gemma_fused_add_rmsnorm(at::Tensor& input, at::Tensor& residual, at::Tensor
 TORCH_LIBRARY_FRAGMENT(TORCH_EXTENSION_NAME, m) {
   // Root mean square normalization
   m.def("rmsnorm", rmsnorm);
+  // QK Root mean square normalization
+  m.def("qk_rmsnorm", qk_rmsnorm);
   // Fused add root mean square normalization
   m.def("fused_add_rmsnorm", fused_add_rmsnorm);
   // Gemma Root mean square normalization

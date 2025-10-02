@@ -47,6 +47,38 @@ void rmsnorm(at::Tensor& output, at::Tensor& input, at::Tensor& weight, double e
   });
 }
 
+void qk_rmsnorm(at::Tensor& output, at::Tensor& input, at::Tensor& weight, double eps,
+                bool enable_pdl) {
+  CHECK_LAST_DIM_CONTIGUOUS_INPUT(input);
+  CHECK_LAST_DIM_CONTIGUOUS_INPUT(output);
+  CHECK_LAST_DIM_CONTIGUOUS_INPUT(weight);
+  auto device = input.device();
+  CHECK_EQ(weight.device(), device);
+  CHECK_DIM(3, input);   // input: (batch_size, num_heads, hidden_size)
+  CHECK_DIM(3, output);  // output: (batch_size, num_heads, hidden_size)
+  CHECK_DIM(1, weight);  // weight: (hidden_size)
+  CHECK_EQ(input.size(2), weight.size(0));
+  unsigned int batch_size = input.size(0);
+  unsigned int num_heads = input.size(1);
+  unsigned int hidden_size = input.size(2);
+  CHECK_EQ(output.size(0), batch_size);
+  CHECK_EQ(output.size(1), num_heads);
+  CHECK_EQ(output.size(2), hidden_size);
+
+  const c10::cuda::OptionalCUDAGuard device_guard(device);
+  const cudaStream_t stream = c10::cuda::getCurrentCUDAStream();
+  DISPATCH_PYTORCH_DTYPE_TO_CTYPE_FP16(input.scalar_type(), c_type, [&] {
+    cudaError_t status = norm::QKRMSNorm(
+        static_cast<c_type*>(input.data_ptr()), static_cast<c_type*>(weight.data_ptr()),
+        static_cast<c_type*>(output.data_ptr()), batch_size, num_heads, hidden_size,
+        input.stride(0), input.stride(1), output.stride(0), output.stride(1), eps, enable_pdl,
+        stream);
+    TORCH_CHECK(status == cudaSuccess,
+                "QKRMSNorm failed with error code " + std::string(cudaGetErrorString(status)));
+    return true;
+  });
+}
+
 void fused_add_rmsnorm(at::Tensor& input, at::Tensor& residual, at::Tensor& weight, double eps,
                        bool enable_pdl) {
   CHECK_LAST_DIM_CONTIGUOUS_INPUT(input);
