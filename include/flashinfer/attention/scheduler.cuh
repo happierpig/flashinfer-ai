@@ -1092,7 +1092,7 @@ inline cudaError_t TwoStageHolisticPlan(void* float_buffer, size_t float_workspa
                                         uint32_t num_kv_heads, uint32_t head_dim, bool causal,
                                         cudaStream_t stream) {
   constexpr uint32_t NUM_TASKS = 2;
-  const uint32_t CTA_TILE_Q_SIZES[NUM_TASKS] = {128, 16};
+  const uint32_t CTA_TILE_Q_SIZES[NUM_TASKS] = {64, 16};
   int num_sm = 0;
   int dev_id = 0;
 

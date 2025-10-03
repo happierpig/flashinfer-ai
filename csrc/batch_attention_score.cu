@@ -146,7 +146,7 @@ void BatchAttentionScoreRun(at::Tensor float_workspace_buffer, at::Tensor int_wo
           PROFILER_PARAMS_SETTER
         }
 
-        cudaError_t status = BatchAttentionScorePersistent<128, 16, HEAD_DIM_QK, HEAD_DIM_VO,
+        cudaError_t status = BatchAttentionScorePersistent<64, 16, HEAD_DIM_QK, HEAD_DIM_VO,
                                                            MASK_MODE, AttentionVariant>(
             params[0], params[1], plan_info.num_blks_x, plan_info.num_blks_y, stream);
         TORCH_CHECK(status == cudaSuccess, "Failed to run persistent attention score, error: ",

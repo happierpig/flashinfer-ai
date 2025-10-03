@@ -602,6 +602,9 @@ __device__ __forceinline__ void logits_to_scores_and_reduction(
     const uint32_t kv_len, const uint_fastdiv group_size,
     DTypeQKAccum (*s_frag)[KTraits::NUM_MMA_KV][8], float (*lse)[2], float* smem,
     const dim3 tid = threadIdx, const uint32_t kv_head_idx = blockIdx.z) {
+  // NOTE (Yilong): no support for warp layout 2x2
+  static_assert(KTraits::NUM_WARPS_Q == 1 || KTraits::NUM_WARPS_KV == 1);
+
   const uint32_t lane_idx = tid.x;
   const uint32_t warp_idx_q = get_warp_idx_q<KTraits>(tid.y);
   constexpr uint32_t num_n_lanes = 0b100;  // 4
@@ -651,29 +654,37 @@ __device__ __forceinline__ void logits_to_scores_and_reduction(
       for (uint32_t i = 0b10000; i >= num_n_lanes; i >>= 1) {
         thr_local_sum += math::shfl_xor_sync(thr_local_sum, i);
       }
-      // dump to smem [num_warps_q, num_mma_kv, 4, num_n_lanes]
-      if (lane_idx < num_n_lanes) {
-        smem[warp_idx_q * KTraits::NUM_MMA_KV * 4 * num_n_lanes + mma_kv * 4 * num_n_lanes +
-             reg_id * num_n_lanes + lane_idx % num_n_lanes] = thr_local_sum;
+
+      if constexpr (KTraits::NUM_WARPS_Q != 1) {
+        // dump to smem [num_warps_q, num_mma_kv, 4, num_n_lanes]
+        if (lane_idx < num_n_lanes) {
+          smem[warp_idx_q * KTraits::NUM_MMA_KV * 4 * num_n_lanes + mma_kv * 4 * num_n_lanes +
+               reg_id * num_n_lanes + lane_idx % num_n_lanes] = thr_local_sum;
+        }
+      } else {
+        // Only one warp on qo-len dimension. no need to reduction
+        s_frag[0][mma_kv][reg_id] = thr_local_sum;
       }
     }
   }
 
-  // reduce threadblock-level scores
-  __syncthreads();
+  if constexpr (KTraits::NUM_WARPS_Q != 1) {
+    // reduce threadblock-level scores
+    __syncthreads();
 #pragma unroll
-  for (uint32_t mma_kv = 0; mma_kv < KTraits::NUM_MMA_KV; ++mma_kv) {
+    for (uint32_t mma_kv = 0; mma_kv < KTraits::NUM_MMA_KV; ++mma_kv) {
 #pragma unroll
-    for (uint32_t reg_id = 0; reg_id < 4; ++reg_id) {
-      float cta_local_sum = 0.;
+      for (uint32_t reg_id = 0; reg_id < 4; ++reg_id) {
+        float cta_local_sum = 0.;
 #pragma unroll
-      for (uint32_t warp_idx_q = 0; warp_idx_q < KTraits::NUM_WARPS_Q; ++warp_idx_q) {
-        cta_local_sum +=
-            smem[warp_idx_q * KTraits::NUM_MMA_KV * 4 * num_n_lanes + mma_kv * 4 * num_n_lanes +
-                 reg_id * num_n_lanes + lane_idx % num_n_lanes];
+        for (uint32_t warp_idx_q = 0; warp_idx_q < KTraits::NUM_WARPS_Q; ++warp_idx_q) {
+          cta_local_sum +=
+              smem[warp_idx_q * KTraits::NUM_MMA_KV * 4 * num_n_lanes + mma_kv * 4 * num_n_lanes +
+                   reg_id * num_n_lanes + lane_idx % num_n_lanes];
+        }
+        // remap, reduce computation
+        s_frag[0][mma_kv][reg_id] = cta_local_sum;
       }
-      // remap, reduce computation
-      s_frag[0][mma_kv][reg_id] = cta_local_sum;
     }
   }
 
@@ -927,7 +938,9 @@ cudaError_t BatchPagedAttentionPersistent(const Params params_1, const Params pa
   constexpr uint32_t NUM_WARPS_Q_1 = get_num_warps_q(CTA_TILE_Q_1);
   constexpr uint32_t NUM_WARPS_KV_1 = get_num_warps_kv(CTA_TILE_Q_1);
   constexpr uint32_t NUM_MMA_Q_1 = get_num_mma_q(CTA_TILE_Q_1);
-  constexpr uint32_t NUM_MMA_KV_1 = 4;
+  // NOTE (Yilong): CTA_TILE_Q == 64 -> NUM_WARPS_Q == 1
+  // set by profiling BatchPrefill FA2
+  constexpr uint32_t NUM_MMA_KV_1 = (NUM_WARPS_Q_1 == 1 ? 8 : 4);
   constexpr uint32_t NUM_MMA_D_QK = HEAD_DIM_QK / 16;
   constexpr uint32_t NUM_MMA_D_VO = HEAD_DIM_VO / 16;
   using KTraits1 = KernelTraits<MASK_MODE, CTA_TILE_Q_1, NUM_MMA_Q_1, NUM_MMA_KV_1, NUM_MMA_D_QK,
@@ -973,22 +986,26 @@ cudaError_t BatchAttentionScorePersistent(const Params params_1, const Params pa
   using DTypeKV = typename Params::DTypeKV;
   using DTypeO = typename Params::DTypeO;
   using IdType = typename Params::IdType;
-  constexpr uint32_t NUM_WARPS_Q_1 = get_num_warps_q(CTA_TILE_Q_1);
-  constexpr uint32_t NUM_WARPS_KV_1 = get_num_warps_kv(CTA_TILE_Q_1);
-  constexpr uint32_t NUM_MMA_Q_1 = get_num_mma_q(CTA_TILE_Q_1);
-  constexpr uint32_t NUM_MMA_KV_1 = 4;
+
+  // NOTE (Yilong): below is hardcoded by tuning
+  constexpr uint32_t NUM_WARPS_Q_1 = 1;
+  constexpr uint32_t NUM_WARPS_KV_1 = 4;
+  constexpr uint32_t NUM_MMA_Q_1 = 4;
+  constexpr uint32_t NUM_MMA_KV_1 = 1;
+  static_assert(NUM_WARPS_Q_1 * NUM_MMA_Q_1 * 16 == CTA_TILE_Q_1);
+
   constexpr uint32_t NUM_MMA_D_QK = HEAD_DIM_QK / 16;
   constexpr uint32_t NUM_MMA_D_VO = HEAD_DIM_VO / 16;
   using KTraits1 = KernelTraits<MASK_MODE, CTA_TILE_Q_1, NUM_MMA_Q_1, NUM_MMA_KV_1, NUM_MMA_D_QK,
                                 NUM_MMA_D_VO, NUM_WARPS_Q_1, NUM_WARPS_KV_1, PosEncodingMode::kNone,
-                                DTypeQ, DTypeKV, DTypeO, float, IdType, AttentionVariant>;
+                                DTypeQ, DTypeKV, DTypeO, float, IdType, AttentionVariant, true>;
   constexpr uint32_t NUM_WARPS_Q_2 = get_num_warps_q(CTA_TILE_Q_2);
   constexpr uint32_t NUM_WARPS_KV_2 = get_num_warps_kv(CTA_TILE_Q_2);
   constexpr uint32_t NUM_MMA_Q_2 = get_num_mma_q(CTA_TILE_Q_2);
   constexpr uint32_t NUM_MMA_KV_2 = 2;
   using KTraits2 = KernelTraits<MASK_MODE, CTA_TILE_Q_2, NUM_MMA_Q_2, NUM_MMA_KV_2, NUM_MMA_D_QK,
                                 NUM_MMA_D_VO, NUM_WARPS_Q_2, NUM_WARPS_KV_2, PosEncodingMode::kNone,
-                                DTypeQ, DTypeKV, DTypeO, float, IdType, AttentionVariant>;
+                                DTypeQ, DTypeKV, DTypeO, float, IdType, AttentionVariant, true>;
 
   // Attention state reduction kernel
   constexpr uint32_t NUM_THREADS =
