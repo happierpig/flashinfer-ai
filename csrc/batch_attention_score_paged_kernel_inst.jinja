@@ -3,6 +3,10 @@
 
 namespace flashinfer {
 template cudaError_t BatchAttentionScorePersistent<
+    /*CTA_TILE_Q_1=*/32, /*CTA_TILE_Q_2=*/16, {{head_dim_qk}}, {{head_dim_vo}}, {{mask_mode}},
+    {{ variant_name }}, PersistentParams>(const PersistentParams params_1, const PersistentParams params_2,
+    const uint32_t num_blks_x, const uint32_t num_blks_y, const cudaStream_t stream);
+template cudaError_t BatchAttentionScorePersistent<
     /*CTA_TILE_Q_1=*/64, /*CTA_TILE_Q_2=*/16, {{head_dim_qk}}, {{head_dim_vo}}, {{mask_mode}},
     {{ variant_name }}, PersistentParams>(const PersistentParams params_1, const PersistentParams params_2,
     const uint32_t num_blks_x, const uint32_t num_blks_y, const cudaStream_t stream);

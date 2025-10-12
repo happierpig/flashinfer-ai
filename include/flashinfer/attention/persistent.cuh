@@ -990,7 +990,7 @@ cudaError_t BatchAttentionScorePersistent(const Params params_1, const Params pa
   // NOTE (Yilong): below is hardcoded by tuning
   constexpr uint32_t NUM_WARPS_Q_1 = 1;
   constexpr uint32_t NUM_WARPS_KV_1 = 4;
-  constexpr uint32_t NUM_MMA_Q_1 = 4;
+  constexpr uint32_t NUM_MMA_Q_1 = CTA_TILE_Q_1 / (NUM_WARPS_Q_1 * 16);
   constexpr uint32_t NUM_MMA_KV_1 = 1;
   static_assert(NUM_WARPS_Q_1 * NUM_MMA_Q_1 * 16 == CTA_TILE_Q_1);
 
