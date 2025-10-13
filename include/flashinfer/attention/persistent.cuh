@@ -793,7 +793,7 @@ struct BlockBatchAttentionScorePersistent {
       // initialize per-work variant for local metadata calculation
       // pass work-idx to get qo-len / kv-len
       AttentionVariant variant(params, work_idx, nullptr);
-      if (variant.request_type != 2) {
+      if (variant.request_type != 2 || packed_qo_start != 0) {
         // only process verification request here
         continue;
       }
